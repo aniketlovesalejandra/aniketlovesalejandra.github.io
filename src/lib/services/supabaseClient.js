@@ -1,15 +1,31 @@
 import { env } from '$env/dynamic/public';
 import { createClient } from '@supabase/supabase-js';
 
-const SUPABASE_URL = env.PUBLIC_SUPABASE_URL;
+function normalizeSupabaseUrl(url) {
+	return (url ?? '').replace(/\/rest\/v1\/?$/, '').replace(/\/+$/, '');
+}
+
+function normalizeUsernameDomain(domain) {
+	return (domain ?? 'canvas.local').trim().replace(/^@+/, '').toLowerCase() || 'canvas.local';
+}
+
+function normalizeAuthValue(value) {
+	return (value ?? '').trim().toLowerCase();
+}
+
+const SUPABASE_URL = normalizeSupabaseUrl(env.PUBLIC_SUPABASE_URL);
 const SUPABASE_ANON_KEY = env.PUBLIC_SUPABASE_ANON_KEY;
+const AUTH_USERNAME = normalizeAuthValue(env.PUBLIC_SUPABASE_AUTH_USERNAME);
+const AUTH_EMAIL = normalizeAuthValue(env.PUBLIC_SUPABASE_AUTH_EMAIL);
 
 export const hasSupabaseConfig = Boolean(SUPABASE_URL && SUPABASE_ANON_KEY);
+export const authUsernameDomain = normalizeUsernameDomain(env.PUBLIC_SUPABASE_USERNAME_DOMAIN);
 export const canvasStorageBucket = 'canvas-uploads';
 export const canvasTableName = 'canvas_state';
 export const canvasRowId = 'forever-canvas';
 
 const localStorageKey = 'alejandra-forever-canvas-v1';
+const signedUrlTtlSeconds = 60 * 60 * 24 * 7;
 
 export const supabase = hasSupabaseConfig
 	? createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
@@ -74,6 +90,23 @@ export function saveLocalCanvasState(state) {
 	return cleanState;
 }
 
+async function updateRemoteCanvasState(cleanState) {
+	const { data, error } = await supabase
+		.from(canvasTableName)
+		.update({
+			state: cleanState,
+			updated_at: cleanState.updatedAt
+		})
+		.eq('id', canvasRowId)
+		.select('id');
+
+	if (error) {
+		throw error;
+	}
+
+	return Boolean(data?.length);
+}
+
 export async function loadCanvasState() {
 	if (!supabase) {
 		return loadLocalCanvasState();
@@ -103,14 +136,26 @@ export async function saveCanvasState(state, options = {}) {
 		return { target: 'local', state: cleanState };
 	}
 
-	const { error } = await supabase.from(canvasTableName).upsert({
+	const row = {
 		id: canvasRowId,
 		state: cleanState,
 		updated_at: cleanState.updatedAt
-	});
+	};
 
-	if (error) {
-		throw error;
+	const updated = await updateRemoteCanvasState(cleanState);
+
+	if (!updated) {
+		const { error } = await supabase.from(canvasTableName).insert(row);
+
+		if (error?.code === '23505') {
+			const retryUpdated = await updateRemoteCanvasState(cleanState);
+
+			if (!retryUpdated) {
+				throw new Error('Canvas state exists, but this signed-in user cannot update it.');
+			}
+		} else if (error) {
+			throw error;
+		}
 	}
 
 	return { target: 'supabase', state: cleanState };
@@ -134,16 +179,38 @@ export function onAuthChange(callback) {
 	return () => data.subscription.unsubscribe();
 }
 
-export async function signInWithEmail(email) {
+function usernameToAuthEmail(username) {
+	const value = username.trim().toLowerCase();
+	if (value.includes('@')) return value;
+	if (AUTH_USERNAME && AUTH_EMAIL && value === AUTH_USERNAME) return AUTH_EMAIL;
+
+	const safeUsername = value
+		.replace(/[^a-z0-9._-]+/g, '-')
+		.replace(/^-+|-+$/g, '');
+
+	if (!safeUsername) {
+		throw new Error('Enter a username.');
+	}
+
+	return `${safeUsername}@${authUsernameDomain}`;
+}
+
+export function authEmailToUsername(email) {
+	const value = normalizeAuthValue(email);
+	if (AUTH_USERNAME && AUTH_EMAIL && value === AUTH_EMAIL) return AUTH_USERNAME;
+
+	const suffix = `@${authUsernameDomain}`;
+	return value.endsWith(suffix) ? value.slice(0, -suffix.length) : value;
+}
+
+export async function signInWithPassword(username, password) {
 	if (!supabase) {
 		throw new Error('Supabase is not configured yet.');
 	}
 
-	return supabase.auth.signInWithOtp({
-		email,
-		options: {
-			emailRedirectTo: isBrowser() ? window.location.origin + window.location.pathname : undefined
-		}
+	return supabase.auth.signInWithPassword({
+		email: usernameToAuthEmail(username),
+		password
 	});
 }
 
@@ -167,6 +234,45 @@ function cleanFilename(name) {
 		.toLowerCase()
 		.replace(/[^a-z0-9._-]+/g, '-')
 		.replace(/^-+|-+$/g, '') || 'canvas-image';
+}
+
+function getCanvasStoragePath(src) {
+	const marker = `/storage/v1/object/public/${canvasStorageBucket}/`;
+	const value = String(src ?? '');
+	const markerIndex = value.indexOf(marker);
+
+	if (markerIndex === -1) {
+		return null;
+	}
+
+	try {
+		const url = new URL(value);
+		return decodeURIComponent(url.pathname.slice(url.pathname.indexOf(marker) + marker.length));
+	} catch {
+		return decodeURIComponent(value.slice(markerIndex + marker.length).split(/[?#]/)[0]);
+	}
+}
+
+export async function getCanvasImageDisplayUrl(src) {
+	if (!supabase) {
+		return src;
+	}
+
+	const path = getCanvasStoragePath(src);
+
+	if (!path) {
+		return src;
+	}
+
+	const { data, error } = await supabase.storage
+		.from(canvasStorageBucket)
+		.createSignedUrl(path, signedUrlTtlSeconds);
+
+	if (error) {
+		throw error;
+	}
+
+	return data.signedUrl;
 }
 
 export async function uploadCanvasImage(file, options = {}) {

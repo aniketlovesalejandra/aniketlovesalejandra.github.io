@@ -1,12 +1,16 @@
 <script>
 	import { onMount, tick } from 'svelte';
 	import {
+		authEmailToUsername,
 		fileToDataUrl,
+		getCanvasImageDisplayUrl,
 		getSession,
 		hasSupabaseConfig,
 		loadCanvasState,
 		onAuthChange,
 		saveCanvasState,
+		signInWithPassword,
+		signOut,
 		uploadCanvasImage
 	} from '$lib/services/supabaseClient';
 
@@ -30,6 +34,14 @@
 	let isUploading = false;
 	let isLoaded = false;
 	let authSession = null;
+	let authUsername = '';
+	let authPassword = '';
+	let authMessage = '';
+	let authError = '';
+	let isAuthBusy = false;
+	let failedImageIds = [];
+	let imageDisplayUrls = {};
+	let signedUrlAttemptIds = [];
 	let statusMessage = 'Loading your forever canvas…';
 	let drawingToolsStyle = '';
 
@@ -55,6 +67,11 @@
 	onMount(async () => {
 		const unsubscribe = onAuthChange((session) => {
 			authSession = session;
+
+			if (session?.user) {
+				authError = '';
+				authMessage = 'Signed in. Future changes save forever.';
+			}
 		});
 
 		try {
@@ -89,6 +106,70 @@
 			window.clearTimeout(saveTimer);
 		};
 	});
+
+	async function handleSignInSubmit() {
+		const username = authUsername.trim();
+		if (!username || !authPassword) return;
+
+		isAuthBusy = true;
+		authError = '';
+		authMessage = '';
+
+		try {
+			const { data, error } = await signInWithPassword(username, authPassword);
+
+			if (error) {
+				throw error;
+			}
+
+			authSession = data.session;
+			authPassword = '';
+			authMessage = 'Signed in. Saving this canvas forever…';
+
+			try {
+				await saveCanvasState(
+					{
+						version: 1,
+						items,
+						strokes
+					},
+					{ remote: true }
+				);
+
+				statusMessage = 'Saved forever 💌';
+				authMessage = 'Signed in. This canvas is now saving forever.';
+			} catch (saveError) {
+				console.error('Initial permanent save failed', saveError);
+				statusMessage = 'Permanent save failed. A safe local draft was saved instead.';
+				authError = saveError?.message ?? 'Signed in, but the permanent save failed.';
+			}
+		} catch (error) {
+			console.error('Supabase sign-in failed', error);
+			authError = error?.message ?? 'Unable to sign in.';
+		} finally {
+			isAuthBusy = false;
+		}
+	}
+
+	function authDisplayName(session) {
+		return authEmailToUsername(session?.user?.email);
+	}
+
+	async function handleSignOut() {
+		isAuthBusy = true;
+		authError = '';
+
+		try {
+			await signOut();
+			authSession = null;
+			authMessage = 'Signed out. New changes save locally until you sign in again.';
+		} catch (error) {
+			console.error('Supabase sign-out failed', error);
+			authError = error?.message ?? 'Unable to sign out.';
+		} finally {
+			isAuthBusy = false;
+		}
+	}
 
 	function createId(prefix) {
 		if (typeof crypto !== 'undefined' && crypto.randomUUID) {
@@ -556,6 +637,48 @@
 		event.dataTransfer.dropEffect = 'copy';
 	}
 
+	function imageLoadFailed(item) {
+		return failedImageIds.includes(item.id);
+	}
+
+	function imageDisplaySrc(item) {
+		return imageDisplayUrls[item.id] ?? item.src;
+	}
+
+	function handleImageLoad(item) {
+		if (imageLoadFailed(item)) {
+			failedImageIds = failedImageIds.filter((id) => id !== item.id);
+		}
+	}
+
+	async function handleImageError(item) {
+		if (!signedUrlAttemptIds.includes(item.id)) {
+			signedUrlAttemptIds = [...signedUrlAttemptIds, item.id];
+
+			try {
+				const displayUrl = await getCanvasImageDisplayUrl(item.src);
+
+				if (displayUrl && displayUrl !== item.src) {
+					imageDisplayUrls = { ...imageDisplayUrls, [item.id]: displayUrl };
+					statusMessage = 'Image uploaded. Using a private signed URL to display it.';
+					return;
+				}
+			} catch (error) {
+				console.error('Unable to create a signed image URL', error);
+			}
+		}
+
+		if (!imageLoadFailed(item)) {
+			failedImageIds = [...failedImageIds, item.id];
+		}
+
+		if (typeof item.src === 'string' && item.src.includes('/storage/v1/object/public/')) {
+			statusMessage = 'Image uploaded, but its public URL is blocked. Make the canvas-uploads bucket public.';
+		} else {
+			statusMessage = 'Image saved, but this browser could not display it.';
+		}
+	}
+
 	async function handleDrop(event) {
 		event.preventDefault();
 		const rect = boardEl.getBoundingClientRect();
@@ -682,15 +805,18 @@
 			{/if}
 
 			{#each items as item (item.id)}
-				<div class="canvas-item" style={itemStyle(item)}>
-					<img src={item.src} alt={item.alt ?? ''} draggable="false" />
+				<div class="canvas-item" class:image-load-failed={imageLoadFailed(item)} style={itemStyle(item)}>
+					<img src={imageDisplaySrc(item)} alt={item.alt ?? ''} draggable="false" on:load={() => handleImageLoad(item)} on:error={() => handleImageError(item)} />
+					{#if imageLoadFailed(item)}
+						<span class="image-fallback">Image saved, URL blocked</span>
+					{/if}
 				</div>
 			{/each}
 
 			<div class="image-controls-layer" aria-label="Image controls">
 				{#each items as item (item.id)}
-					<div class="image-controls" class:selected={selectedItemId === item.id} style={itemStyle(item, 20)}>
-						<img class="control-measure" src={item.src} alt="" draggable="false" />
+					<div class="image-controls" class:selected={selectedItemId === item.id} class:image-load-failed={imageLoadFailed(item)} style={itemStyle(item, 20)}>
+						<img class="control-measure" src={imageDisplaySrc(item)} alt="" draggable="false" />
 						<button
 							type="button"
 							class="select-image"
@@ -772,6 +898,42 @@
 			{/each}
 		</div>
 	</div>
+
+	{#if hasSupabaseConfig}
+		<form class="sync-panel" aria-label="Forever save status" on:submit|preventDefault={handleSignInSubmit}>
+			<div class="sync-copy">
+				<strong>{canSaveForever ? 'Forever save is on' : 'Local draft only'}</strong>
+				<span>{canSaveForever ? authDisplayName(authSession) : 'Sign in with your username and password to save across devices.'}</span>
+				<small>{statusMessage}</small>
+			</div>
+
+			{#if canSaveForever}
+				<button type="button" class="sync-button" disabled={isAuthBusy} on:click={handleSignOut}>Sign out</button>
+			{:else}
+				<label class="sr-only" for="canvas-auth-username">Username</label>
+				<input id="canvas-auth-username" type="text" bind:value={authUsername} autocomplete="username" placeholder="username" disabled={isAuthBusy} required />
+				<label class="sr-only" for="canvas-auth-password">Password</label>
+				<input id="canvas-auth-password" type="password" bind:value={authPassword} autocomplete="current-password" placeholder="password" disabled={isAuthBusy} required />
+				<button type="submit" class="sync-button" disabled={isAuthBusy}>{isAuthBusy ? 'Signing in…' : 'Sign in'}</button>
+			{/if}
+
+			{#if authMessage}
+				<p class="auth-message">{authMessage}</p>
+			{/if}
+
+			{#if authError}
+				<p class="auth-error">{authError}</p>
+			{/if}
+		</form>
+	{:else}
+		<div class="sync-panel local-only" aria-label="Forever save status">
+			<div class="sync-copy">
+				<strong>Local draft only</strong>
+				<span>Add Supabase keys before building to save across devices.</span>
+				<small>{statusMessage}</small>
+			</div>
+		</div>
+	{/if}
 
 	<p class="sr-only" aria-live="polite">{statusMessage}</p>
 </section>
@@ -863,6 +1025,34 @@
 		-webkit-user-drag: none;
 	}
 
+	.canvas-item.image-load-failed,
+	.image-controls.image-load-failed {
+		aspect-ratio: 4 / 3;
+		min-height: 4rem;
+	}
+
+	.canvas-item.image-load-failed {
+		display: grid;
+		place-items: center;
+		padding: 0.65rem;
+		border: 1px solid rgba(196, 47, 98, 0.28);
+		border-radius: 1rem;
+		color: #8c2d52;
+		background: rgba(255, 255, 255, 0.78);
+		box-shadow: 0 18px 42px rgba(93, 32, 62, 0.14);
+		text-align: center;
+	}
+
+	.canvas-item.image-load-failed img {
+		display: none;
+	}
+
+	.image-fallback {
+		font-size: 0.74rem;
+		font-weight: 900;
+		line-height: 1.25;
+	}
+
 	.image-controls-layer {
 		position: absolute;
 		inset: 0;
@@ -886,6 +1076,10 @@
 		pointer-events: none;
 		user-select: none;
 		-webkit-user-drag: none;
+	}
+
+	.image-controls.image-load-failed .control-measure {
+		height: 100%;
 	}
 
 	.select-image {
@@ -1081,6 +1275,111 @@
 		box-shadow: 0 0 0 3px rgba(255, 95, 159, 0.36), 0 8px 14px rgba(115, 37, 78, 0.16);
 	}
 
+	.sync-panel {
+		position: fixed;
+		top: clamp(1rem, 2.8vw, 1.7rem);
+		right: clamp(1rem, 3vw, 2rem);
+		z-index: 7;
+		display: grid;
+		gap: 0.56rem;
+		width: min(21rem, calc(100vw - 2rem));
+		padding: 0.78rem;
+		border: 1px solid rgba(255, 255, 255, 0.72);
+		border-radius: 1.15rem;
+		color: #5f2139;
+		background: linear-gradient(135deg, rgba(255, 255, 255, 0.82), rgba(255, 226, 240, 0.88));
+		box-shadow: 0 16px 36px rgba(150, 44, 92, 0.16), inset 0 1px 0 rgba(255, 255, 255, 0.95);
+		backdrop-filter: blur(22px) saturate(1.35);
+		pointer-events: auto;
+	}
+
+	.sync-copy {
+		display: grid;
+		gap: 0.18rem;
+	}
+
+	.sync-copy strong {
+		font-size: 0.82rem;
+		font-weight: 950;
+		letter-spacing: 0.04em;
+		text-transform: uppercase;
+	}
+
+	.sync-copy span,
+	.sync-copy small {
+		color: #87516a;
+		font-size: 0.76rem;
+		font-weight: 760;
+		line-height: 1.35;
+	}
+
+	.sync-copy small {
+		color: #a65d7d;
+		font-size: 0.72rem;
+	}
+
+	.sync-panel input {
+		width: 100%;
+		min-width: 0;
+		padding: 0.58rem 0.7rem;
+		border: 1px solid rgba(151, 71, 255, 0.18);
+		border-radius: 0.8rem;
+		color: #5f2139;
+		background: rgba(255, 255, 255, 0.9);
+		box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.9);
+		font-size: 0.82rem;
+		font-weight: 760;
+	}
+
+	.sync-panel input:focus {
+		border-color: rgba(255, 95, 159, 0.54);
+		outline: 3px solid rgba(255, 95, 159, 0.22);
+	}
+
+	.sync-button {
+		justify-self: start;
+		padding: 0.54rem 0.8rem;
+		border: 0;
+		border-radius: 999px;
+		color: #fff;
+		background: linear-gradient(135deg, #ff5f9f, #9d6bff);
+		box-shadow: 0 12px 24px rgba(111, 39, 78, 0.18), inset 0 1px 0 rgba(255, 255, 255, 0.45);
+		font: inherit;
+		font-size: 0.8rem;
+		font-weight: 900;
+		cursor: pointer;
+		transition: transform 160ms ease, box-shadow 160ms ease, opacity 160ms ease;
+	}
+
+	.sync-button:hover,
+	.sync-button:focus-visible {
+		transform: translateY(-1px);
+		box-shadow: 0 16px 30px rgba(111, 39, 78, 0.24), inset 0 1px 0 rgba(255, 255, 255, 0.45);
+		outline: none;
+	}
+
+	.sync-button:disabled,
+	.sync-panel input:disabled {
+		cursor: wait;
+		opacity: 0.62;
+	}
+
+	.auth-message,
+	.auth-error {
+		margin: 0;
+		font-size: 0.74rem;
+		font-weight: 800;
+		line-height: 1.35;
+	}
+
+	.auth-message {
+		color: #7d4bc8;
+	}
+
+	.auth-error {
+		color: #c42f62;
+	}
+
 	.sr-only {
 		position: absolute;
 		width: 1px;
@@ -1094,6 +1393,19 @@
 	}
 
 	@media (max-width: 720px) {
+		.sync-panel {
+			top: auto;
+			right: 0.75rem;
+			bottom: 6.4rem;
+			left: 0.75rem;
+			width: auto;
+			padding: 0.64rem;
+		}
+
+		.sync-copy small {
+			display: none;
+		}
+
 		.drawing-tools {
 			top: clamp(4.6rem, 22vw, 6.2rem);
 			gap: 0.2rem;

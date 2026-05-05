@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 1120">
+  <defs><linearGradient id="g" x1="0" x2="1" y1="0" y2="1"><stop stop-color="#ffeaf3"/><stop offset=".55" stop-color="#f3e9ff"/><stop offset="1" stop-color="#ffd166"/></linearGradient></defs>
+  <rect width="800" height="1120" fill="url(#g)"/>
+  <path d="M115 190h570v690H115z" rx="42" fill="#fff" opacity=".42"/>
+  <path d="M400 615S220 500 220 320c0-76 56-130 130-130 35 0 62 17 78 46 16-29 43-46 78-46 74 0 130 54 130 130 0 180-236 295-236 295Z" fill="#ff5f9f"/>
+  <text x="400" y="945" text-anchor="middle" font-size="58" font-family="Inter, Arial" font-weight="800" fill="#7b2d49">Photo 5</text>
+  <text x="400" y="1010" text-anchor="middle" font-size="30" font-family="Inter, Arial" fill="#9b526c">Forever pin</text>
+</svg>

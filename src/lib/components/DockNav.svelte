@@ -75,13 +75,13 @@
 
 	.dock {
 		display: flex;
-		gap: 0.8rem;
+		gap: 0.48rem;
 		align-items: end;
-		padding: 0.7rem;
+		padding: 0.45rem;
 		border: 1px solid rgba(255, 255, 255, 0.68);
-		border-radius: 1.8rem;
+		border-radius: 1.35rem;
 		background: linear-gradient(135deg, rgba(255, 255, 255, 0.58), rgba(255, 226, 240, 0.72));
-		box-shadow: 0 24px 70px rgba(150, 44, 92, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.95);
+		box-shadow: 0 18px 48px rgba(150, 44, 92, 0.18), inset 0 1px 0 rgba(255, 255, 255, 0.95);
 		backdrop-filter: blur(24px) saturate(1.5);
 		pointer-events: auto;
 	}
@@ -90,46 +90,46 @@
 		position: relative;
 		display: grid;
 		place-items: center;
-		width: clamp(4.4rem, 14vw, 5.4rem);
-		height: clamp(4.4rem, 14vw, 5.4rem);
-		padding: 0.45rem;
+		width: clamp(3.35rem, 10vw, 4.05rem);
+		height: clamp(3.35rem, 10vw, 4.05rem);
+		padding: 0.35rem;
 		border: 0;
-		border-radius: 1.35rem;
+		border-radius: 1rem;
 		color: #64263c;
 		background: linear-gradient(145deg, rgba(255, 255, 255, 0.94), rgba(255, 236, 246, 0.92));
-		box-shadow: 0 14px 35px rgba(145, 43, 94, 0.18), inset 0 1px 0 #fff;
+		box-shadow: 0 10px 25px rgba(145, 43, 94, 0.16), inset 0 1px 0 #fff;
 		cursor: pointer;
 		transition: transform 180ms ease, box-shadow 180ms ease, background 180ms ease;
 	}
 
 	.dock-button:hover,
 	.dock-button:focus-visible {
-		transform: translateY(-0.45rem) scale(1.08);
-		box-shadow: 0 20px 45px rgba(145, 43, 94, 0.25), inset 0 1px 0 #fff;
+		transform: translateY(-0.28rem) scale(1.05);
+		box-shadow: 0 15px 32px rgba(145, 43, 94, 0.22), inset 0 1px 0 #fff;
 		outline: none;
 	}
 
 	.dock-button.active {
 		background: linear-gradient(145deg, #ffffff, #ffe0ef);
-		transform: translateY(-0.3rem) scale(1.04);
+		transform: translateY(-0.18rem) scale(1.03);
 	}
 
 	.dock-button.active::after {
 		content: '';
 		position: absolute;
-		bottom: -0.45rem;
-		width: 0.48rem;
-		height: 0.48rem;
+		bottom: -0.32rem;
+		width: 0.36rem;
+		height: 0.36rem;
 		border-radius: 999px;
 		background: #ff5f9f;
-		box-shadow: 0 0 0 0.25rem rgba(255, 95, 159, 0.16);
+		box-shadow: 0 0 0 0.18rem rgba(255, 95, 159, 0.16);
 	}
 
 	.icon-wrap {
 		display: grid;
 		place-items: center;
-		width: 2.7rem;
-		height: 2.7rem;
+		width: 2rem;
+		height: 2rem;
 	}
 
 	svg {
@@ -139,15 +139,15 @@
 	}
 
 	.label {
-		font-size: 0.7rem;
+		font-size: 0.58rem;
 		font-weight: 800;
 		letter-spacing: 0.02em;
 	}
 
 	@media (max-width: 520px) {
 		.dock {
-			gap: 0.55rem;
-			padding: 0.55rem;
+			gap: 0.38rem;
+			padding: 0.38rem;
 		}
 
 		.label {

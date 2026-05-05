@@ -3,7 +3,7 @@
 
 	export let title = 'A Spotify song for us';
 
-	const fallbackEmbedUrl = 'https://open.spotify.com/embed/playlist/37i9dQZF1DX50QitC6Oqtn?utm_source=generator&theme=0';
+	const fallbackEmbedUrl = 'https://open.spotify.com/embed/track/16gJmoOqRt2lKmlXtDpWgH?utm_source=generator&theme=0';
 	$: embedUrl = env.PUBLIC_SPOTIFY_EMBED_URL || fallbackEmbedUrl;
 </script>
 
@@ -16,8 +16,9 @@
 		title={title}
 		src={embedUrl}
 		width="100%"
-		height="152"
+		height="352"
 		frameborder="0"
+		allowfullscreen
 		allow="autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture"
 		loading="lazy"
 	/>

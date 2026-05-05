@@ -13,6 +13,7 @@
 	let boardEl;
 	let drawingCanvas;
 	let resizeObserver;
+	let toolsPositionObserver;
 	let saveTimer;
 
 	let items = [];
@@ -22,17 +23,28 @@
 	let currentResize = null;
 	let currentDrag = null;
 	let currentRotate = null;
+	let brushColor = '#9747ff';
 	let selectedItemId = null;
+	let eraserPreview = { x: 0, y: 0, visible: false };
 	let isDrawing = false;
 	let isUploading = false;
 	let isLoaded = false;
 	let authSession = null;
 	let statusMessage = 'Loading your forever canvas…';
+	let drawingToolsStyle = '';
 
 	const brush = {
-		color: '#9747ff',
 		width: 4
 	};
+
+	const penColors = [
+		{ label: 'Purple', value: '#9747ff' },
+		{ label: 'Pink', value: '#ff5f9f' },
+		{ label: 'Red', value: '#ff477e' },
+		{ label: 'Blue', value: '#38a3ff' },
+		{ label: 'Green', value: '#2ecf8f' },
+		{ label: 'Gold', value: '#ffb703' }
+	];
 
 	const eraser = {
 		width: 28
@@ -54,15 +66,26 @@
 		await loadInitialState();
 		await tick();
 		resizeDrawingCanvas();
+		updateDrawingToolsPosition();
 
 		if (typeof ResizeObserver !== 'undefined' && boardEl) {
 			resizeObserver = new ResizeObserver(resizeDrawingCanvas);
 			resizeObserver.observe(boardEl);
 		}
 
+		const dateHeading = document.querySelector('.date-header h1');
+		if (typeof ResizeObserver !== 'undefined' && dateHeading) {
+			toolsPositionObserver = new ResizeObserver(updateDrawingToolsPosition);
+			toolsPositionObserver.observe(dateHeading);
+		}
+
+		window.addEventListener('resize', updateDrawingToolsPosition);
+
 		return () => {
 			unsubscribe();
 			resizeObserver?.disconnect();
+			toolsPositionObserver?.disconnect();
+			window.removeEventListener('resize', updateDrawingToolsPosition);
 			window.clearTimeout(saveTimer);
 		};
 	});
@@ -127,6 +150,17 @@
 		redrawAll();
 	}
 
+	function updateDrawingToolsPosition() {
+		if (typeof document === 'undefined') return;
+
+		const dateHeading = document.querySelector('.date-header h1');
+		if (!dateHeading) return;
+
+		const offset = window.innerWidth <= 720 ? 10 : 12;
+		const top = Math.round(dateHeading.getBoundingClientRect().bottom + offset);
+		drawingToolsStyle = `top: ${top}px`;
+	}
+
 	function redrawAll(extraStroke = currentStroke) {
 		if (!boardEl || !drawingCanvas) return;
 
@@ -149,7 +183,7 @@
 
 		const isEraser = stroke.tool === 'eraser';
 		const strokeWidth = stroke.width ?? (isEraser ? eraser.width : brush.width);
-		const strokeColor = isEraser ? 'rgba(0, 0, 0, 1)' : (stroke.color ?? brush.color);
+		const strokeColor = isEraser ? 'rgba(0, 0, 0, 1)' : (stroke.color ?? brushColor);
 
 		context.save();
 		context.globalCompositeOperation = isEraser ? 'destination-out' : 'source-over';
@@ -160,6 +194,7 @@
 		context.lineWidth = strokeWidth;
 
 		const first = points[0];
+
 		context.beginPath();
 		context.moveTo(first.x * rect.width, first.y * rect.height);
 
@@ -188,12 +223,41 @@
 
 	function setTool(tool) {
 		currentTool = tool;
+		eraserPreview = { ...eraserPreview, visible: false };
+	}
+
+	function selectPenColor(color) {
+		brushColor = color;
+		currentTool = 'pencil';
+		eraserPreview = { ...eraserPreview, visible: false };
+		statusMessage = 'Pen color changed.';
+	}
+
+	function updateEraserPreview(event) {
+		if (currentTool !== 'eraser' || !boardEl) {
+			eraserPreview = { ...eraserPreview, visible: false };
+			return;
+		}
+
+		const rect = boardEl.getBoundingClientRect();
+		eraserPreview = {
+			x: event.clientX - rect.left,
+			y: event.clientY - rect.top,
+			visible: true
+		};
+	}
+
+	function hideEraserPreview() {
+		if (!isDrawing) {
+			eraserPreview = { ...eraserPreview, visible: false };
+		}
 	}
 
 	function startDrawing(event) {
 		if (!isLoaded) return;
 
 		event.preventDefault();
+		updateEraserPreview(event);
 		selectedItemId = null;
 		drawingCanvas.setPointerCapture?.(event.pointerId);
 		const tool = currentTool === 'eraser' ? 'eraser' : 'pencil';
@@ -202,11 +266,26 @@
 		currentStroke = {
 			id: createId('stroke'),
 			tool,
-			color: brush.color,
+			color: brushColor,
 			width: isEraser ? eraser.width : brush.width,
 			points: [getPointerPoint(event)]
 		};
 		redrawAll(currentStroke);
+	}
+
+	function handleDrawingPointerMove(event) {
+		updateEraserPreview(event);
+		continueDrawing(event);
+	}
+
+	function handleDrawingPointerUp(event) {
+		endDrawing(event);
+		updateEraserPreview(event);
+	}
+
+	function handleDrawingPointerCancel(event) {
+		endDrawing(event);
+		eraserPreview = { ...eraserPreview, visible: false };
 	}
 
 	function continueDrawing(event) {
@@ -585,11 +664,22 @@
 				class="drawing-layer"
 				class:eraser-enabled={currentTool === 'eraser'}
 				on:pointerdown={startDrawing}
-				on:pointermove={continueDrawing}
-				on:pointerup={endDrawing}
-				on:pointercancel={endDrawing}
+				on:pointermove={handleDrawingPointerMove}
+				on:pointerup={handleDrawingPointerUp}
+				on:pointercancel={handleDrawingPointerCancel}
+				on:pointerleave={hideEraserPreview}
+				on:mousemove={updateEraserPreview}
+				on:mouseleave={hideEraserPreview}
 				aria-label="Always-on drawing layer"
 			/>
+
+			{#if currentTool === 'eraser' && eraserPreview.visible}
+				<div
+					class="eraser-outline"
+					style={`left: ${eraserPreview.x}px; top: ${eraserPreview.y}px; width: ${eraser.width}px; height: ${eraser.width}px`}
+					aria-hidden="true"
+				></div>
+			{/if}
 
 			{#each items as item (item.id)}
 				<div class="canvas-item" style={itemStyle(item)}>
@@ -656,13 +746,31 @@
 		</div>
 	</div>
 
-	<div class="drawing-tools" aria-label="Drawing tools">
-		<button type="button" class:active={currentTool === 'pencil'} aria-pressed={currentTool === 'pencil'} on:click={() => setTool('pencil')}>
-			✏️ Pen
-		</button>
-		<button type="button" class:active={currentTool === 'eraser'} aria-pressed={currentTool === 'eraser'} on:click={() => setTool('eraser')}>
-			🧽 Eraser
-		</button>
+	<div class="drawing-tools" style={drawingToolsStyle} aria-label="Drawing tools">
+		<div class="tool-icons" aria-label="Pen and eraser">
+			<button type="button" class="tool-icon" class:active={currentTool === 'pencil'} aria-label="Draw" aria-pressed={currentTool === 'pencil'} title="Draw" on:click={() => setTool('pencil')}>
+				✏️
+			</button>
+			<button type="button" class="tool-icon" class:active={currentTool === 'eraser'} aria-label="Erase" aria-pressed={currentTool === 'eraser'} title="Erase" on:click={() => setTool('eraser')}>
+				🧽
+			</button>
+		</div>
+
+		<div class="color-palette" aria-label="Pen colors">
+			{#each penColors as color}
+				<button
+					type="button"
+					class="color-swatch"
+					class:active={currentTool === 'pencil' && brushColor === color.value}
+					style={`--swatch-color: ${color.value}`}
+					aria-label={`Use ${color.label} pen`}
+					title={`${color.label} pen`}
+					on:click={() => selectPenColor(color.value)}
+				>
+					<span class="sr-only">{color.label}</span>
+				</button>
+			{/each}
+		</div>
 	</div>
 
 	<p class="sr-only" aria-live="polite">{statusMessage}</p>
@@ -718,7 +826,18 @@
 	}
 
 	.drawing-layer.eraser-enabled {
-		cursor: cell;
+		cursor: none;
+	}
+
+	.eraser-outline {
+		position: absolute;
+		z-index: 6;
+		border: 2px solid rgba(99, 39, 69, 0.72);
+		border-radius: 999px;
+		background: rgba(255, 255, 255, 0.16);
+		box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.6), 0 8px 22px rgba(104, 43, 76, 0.16);
+		pointer-events: none;
+		transform: translate(-50%, -50%);
 	}
 
 	.canvas-item,
@@ -882,43 +1001,84 @@
 	.drawing-tools {
 		position: fixed;
 		left: 50%;
-		bottom: max(7.25rem, calc(env(safe-area-inset-bottom) + 6.75rem));
+		top: clamp(5.2rem, 11.5vw, 8.85rem);
 		z-index: 6;
 		display: flex;
-		gap: 0.55rem;
-		padding: 0.55rem;
+		align-items: center;
+		gap: 0.25rem;
+		padding: 0.26rem;
 		border: 1px solid rgba(255, 255, 255, 0.68);
 		border-radius: 999px;
 		background: linear-gradient(135deg, rgba(255, 255, 255, 0.66), rgba(255, 226, 240, 0.76));
-		box-shadow: 0 24px 70px rgba(150, 44, 92, 0.18), inset 0 1px 0 rgba(255, 255, 255, 0.95);
+		box-shadow: 0 12px 28px rgba(150, 44, 92, 0.14), inset 0 1px 0 rgba(255, 255, 255, 0.95);
 		backdrop-filter: blur(22px) saturate(1.4);
 		pointer-events: auto;
 		transform: translateX(-50%);
 	}
 
+	.tool-icons,
+	.color-palette {
+		display: flex;
+		align-items: center;
+		gap: 0.18rem;
+	}
+
+	.tool-icons {
+		padding-right: 0.22rem;
+		border-right: 1px solid rgba(142, 63, 99, 0.12);
+	}
+
 	.drawing-tools button {
 		border: 0;
 		border-radius: 999px;
-		padding: 0.65rem 0.95rem;
 		font: inherit;
-		font-weight: 850;
 		color: #6b2842;
 		background: rgba(255, 255, 255, 0.92);
-		box-shadow: 0 10px 24px rgba(160, 50, 100, 0.13), inset 0 1px 0 #fff;
+		box-shadow: 0 6px 14px rgba(160, 50, 100, 0.11), inset 0 1px 0 #fff;
 		cursor: pointer;
 		transition: transform 160ms ease, box-shadow 160ms ease, background 160ms ease;
+	}
+
+	.tool-icon {
+		display: grid;
+		place-items: center;
+		width: 1.62rem;
+		height: 1.62rem;
+		padding: 0;
+		font-size: 0.78rem;
+		font-weight: 850;
+	}
+
+	.color-swatch {
+		display: grid;
+		place-items: center;
+		width: 1.08rem;
+		height: 1.08rem;
+		padding: 0;
+	}
+
+	.drawing-tools .color-swatch {
+		background-color: var(--swatch-color);
+		background-image: linear-gradient(145deg, rgba(255, 255, 255, 0.34), transparent 48%);
+		box-shadow: inset 0 0 0 1.5px rgba(255, 255, 255, 0.94), 0 6px 12px rgba(115, 37, 78, 0.1);
 	}
 
 	.drawing-tools button:hover,
 	.drawing-tools button:focus-visible {
 		transform: translateY(-1px);
-		box-shadow: 0 14px 30px rgba(160, 50, 100, 0.18), inset 0 1px 0 #fff;
+		box-shadow: 0 10px 18px rgba(160, 50, 100, 0.17), inset 0 1px 0 #fff;
 		outline: none;
 	}
 
-	.drawing-tools button.active {
+	.tool-icon.active {
 		color: #fff;
 		background: linear-gradient(135deg, #ff5f9f, #9d6bff);
+	}
+
+	.drawing-tools .color-swatch.active {
+		outline: 1.5px solid #fff;
+		outline-offset: 1.5px;
+		box-shadow: 0 0 0 3px rgba(255, 95, 159, 0.36), 0 8px 14px rgba(115, 37, 78, 0.16);
 	}
 
 	.sr-only {
@@ -935,13 +1095,20 @@
 
 	@media (max-width: 720px) {
 		.drawing-tools {
-			bottom: max(6.2rem, calc(env(safe-area-inset-bottom) + 5.8rem));
-			gap: 0.4rem;
-			padding: 0.45rem;
+			top: clamp(4.6rem, 22vw, 6.2rem);
+			gap: 0.2rem;
+			padding: 0.22rem;
 		}
 
-		.drawing-tools button {
-			padding: 0.62rem 0.8rem;
+		.tool-icon {
+			width: 1.5rem;
+			height: 1.5rem;
+			font-size: 0.72rem;
+		}
+
+		.color-swatch {
+			width: 1rem;
+			height: 1rem;
 		}
 
 		.canvas-item,

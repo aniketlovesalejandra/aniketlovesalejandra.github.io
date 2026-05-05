@@ -25,7 +25,9 @@
 	<header class="date-header" aria-label="Today">
 		<p>Today is</p>
 		<h1>{dateText}</h1>
-		<span>{activeView === 'canvas' ? 'Drag photos onto the page, write with the pen, or switch to the eraser.' : 'Cake, music, a letter, and five memory pins.'}</span>
+		{#if activeView !== 'canvas'}
+			<span>Cake, music, a letter, and five memory pins.</span>
+		{/if}
 	</header>
 
 	<section class="view-stage" aria-live="polite">

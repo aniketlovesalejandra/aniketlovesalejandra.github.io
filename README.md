@@ -146,3 +146,19 @@ After deploying, sign in from the canvas with username `aniketlovesalejandra` an
 ```sh
 npm run build
 ```
+
+## Deploy to GitHub Pages
+
+This repo is configured to deploy the static SvelteKit build from `build/` using GitHub Actions.
+
+To host it at `https://aniketlovealejandra.github.io/`, the GitHub account or organization must be named exactly `aniketlovealejandra`, and the repository must be named exactly `aniketlovealejandra.github.io`. If the intended name is `aniketlovesalejandra` with an `s`, use that spelling for both the account or organization and the `.github.io` repository name instead.
+
+1. Push this project to the correctly named GitHub repository.
+2. In GitHub, open **Settings -> Pages**.
+3. Under **Build and deployment**, set **Source** to **GitHub Actions**.
+4. Add the Supabase values used at build time under **Settings -> Secrets and variables -> Actions**:
+	- Variables: `PUBLIC_SUPABASE_URL`, `PUBLIC_SUPABASE_AUTH_USERNAME`, `PUBLIC_SUPABASE_AUTH_EMAIL`
+	- Secret: `PUBLIC_SUPABASE_ANON_KEY`
+5. Push to `main` or `master`, or run the **Deploy to GitHub Pages** workflow manually from the **Actions** tab.
+
+After the workflow finishes, GitHub Pages will serve the site from the root of the matching `.github.io` domain.

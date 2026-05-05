@@ -125,6 +125,32 @@ export async function loadCanvasState() {
 	return data?.state ? normalizeCanvasState(data.state) : loadLocalCanvasState();
 }
 
+export function subscribeToCanvasState(callback) {
+	if (!supabase) return () => {};
+
+	const channel = supabase
+		.channel('forever-canvas-state')
+		.on(
+			'postgres_changes',
+			{
+				event: '*',
+				schema: 'public',
+				table: canvasTableName,
+				filter: `id=eq.${canvasRowId}`
+			},
+			(payload) => {
+				if (payload.new?.state) {
+					callback(normalizeCanvasState(payload.new.state));
+				}
+			}
+		)
+		.subscribe();
+
+	return () => {
+		void supabase.removeChannel(channel);
+	};
+}
+
 export async function saveCanvasState(state, options = {}) {
 	const { remote = true } = options;
 	const cleanState = saveLocalCanvasState({

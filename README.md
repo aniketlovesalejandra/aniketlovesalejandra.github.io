@@ -97,6 +97,23 @@ using (auth.uid() = 'PASTE_AUTH_USER_ID_HERE'::uuid)
 with check (auth.uid() = 'PASTE_AUTH_USER_ID_HERE'::uuid);
 ```
 
+Enable live canvas updates for the table. The app also polls every few seconds as a backup, but Realtime makes changes appear immediately:
+
+```sql
+do $$
+begin
+	if not exists (
+		select 1
+		from pg_publication_tables
+		where pubname = 'supabase_realtime'
+		and schemaname = 'public'
+		and tablename = 'canvas_state'
+	) then
+		alter publication supabase_realtime add table public.canvas_state;
+	end if;
+end $$;
+```
+
 For storage, allow public reads and authenticated uploads only for the same user:
 
 ```sql

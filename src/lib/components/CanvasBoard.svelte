@@ -11,6 +11,7 @@
 		saveCanvasState,
 		signInWithPassword,
 		signOut,
+		subscribeToCanvasState,
 		uploadCanvasImage
 	} from '$lib/services/supabaseClient';
 
@@ -19,6 +20,7 @@
 	let resizeObserver;
 	let toolsPositionObserver;
 	let saveTimer;
+	let syncTimer;
 
 	let items = [];
 	let strokes = [];
@@ -32,6 +34,7 @@
 	let eraserPreview = { x: 0, y: 0, visible: false };
 	let isDrawing = false;
 	let isUploading = false;
+	let isSaving = false;
 	let isLoaded = false;
 	let authSession = null;
 	let authUsername = '';
@@ -42,6 +45,7 @@
 	let failedImageIds = [];
 	let imageDisplayUrls = {};
 	let signedUrlAttemptIds = [];
+	let latestCanvasUpdatedAt = null;
 	let statusMessage = 'Loading your forever canvas…';
 	let drawingToolsStyle = '';
 
@@ -65,7 +69,7 @@
 	$: canSaveForever = hasSupabaseConfig && Boolean(authSession?.user);
 
 	onMount(async () => {
-		const unsubscribe = onAuthChange((session) => {
+		const unsubscribeAuth = onAuthChange((session) => {
 			authSession = session;
 
 			if (session?.user) {
@@ -97,13 +101,16 @@
 		}
 
 		window.addEventListener('resize', updateDrawingToolsPosition);
+		const unsubscribeCanvas = startCanvasSync();
 
 		return () => {
-			unsubscribe();
+			unsubscribeAuth();
+			unsubscribeCanvas();
 			resizeObserver?.disconnect();
 			toolsPositionObserver?.disconnect();
 			window.removeEventListener('resize', updateDrawingToolsPosition);
 			window.clearTimeout(saveTimer);
+			window.clearInterval(syncTimer);
 		};
 	});
 
@@ -127,7 +134,7 @@
 			authMessage = 'Signed in. Saving this canvas forever…';
 
 			try {
-				await saveCanvasState(
+				const result = await saveCanvasState(
 					{
 						version: 1,
 						items,
@@ -136,6 +143,7 @@
 					{ remote: true }
 				);
 
+				latestCanvasUpdatedAt = result.state.updatedAt;
 				statusMessage = 'Saved forever 💌';
 				authMessage = 'Signed in. This canvas is now saving forever.';
 			} catch (saveError) {
@@ -192,6 +200,7 @@
 			const state = await loadCanvasState();
 			items = state.items ?? [];
 			strokes = state.strokes ?? [];
+			latestCanvasUpdatedAt = state.updatedAt;
 			isLoaded = true;
 			statusMessage = state.updatedAt
 				? `Loaded the canvas saved ${formatTimestamp(state.updatedAt)}.`
@@ -214,6 +223,65 @@
 		} catch {
 			return 'recently';
 		}
+	}
+
+	function timestampValue(value) {
+		const time = Date.parse(value ?? '');
+		return Number.isNaN(time) ? 0 : time;
+	}
+
+	function remoteStateIsNewer(state) {
+		return timestampValue(state?.updatedAt) > timestampValue(latestCanvasUpdatedAt);
+	}
+
+	function isCanvasBusy() {
+		return Boolean(isDrawing || isUploading || isSaving || currentStroke || currentResize || currentDrag || currentRotate || saveTimer);
+	}
+
+	async function applyRemoteCanvasState(state) {
+		if (!remoteStateIsNewer(state) || isCanvasBusy()) return;
+
+		items = state.items ?? [];
+		strokes = state.strokes ?? [];
+		latestCanvasUpdatedAt = state.updatedAt;
+
+		const itemIds = new Set(items.map((item) => item.id));
+		failedImageIds = failedImageIds.filter((id) => itemIds.has(id));
+		signedUrlAttemptIds = signedUrlAttemptIds.filter((id) => itemIds.has(id));
+		imageDisplayUrls = Object.fromEntries(Object.entries(imageDisplayUrls).filter(([id]) => itemIds.has(id)));
+
+		if (selectedItemId && !itemIds.has(selectedItemId)) {
+			selectedItemId = null;
+		}
+
+		await tick();
+		redrawAll(null);
+		statusMessage = `Live canvas updated ${formatTimestamp(state.updatedAt)}.`;
+	}
+
+	async function refreshCanvasStateFromRemote() {
+		if (!hasSupabaseConfig || isCanvasBusy()) return;
+
+		try {
+			await applyRemoteCanvasState(await loadCanvasState());
+		} catch (error) {
+			console.warn('Unable to refresh live canvas state', error);
+		}
+	}
+
+	function startCanvasSync() {
+		if (!hasSupabaseConfig) return () => {};
+
+		const unsubscribeRealtime = subscribeToCanvasState((state) => {
+			void applyRemoteCanvasState(state);
+		});
+
+		syncTimer = window.setInterval(refreshCanvasStateFromRemote, 4000);
+
+		return () => {
+			unsubscribeRealtime();
+			window.clearInterval(syncTimer);
+		};
 	}
 
 	function resizeDrawingCanvas() {
@@ -741,6 +809,10 @@
 	}
 
 	async function persistCanvasState() {
+		window.clearTimeout(saveTimer);
+		saveTimer = null;
+		isSaving = true;
+
 		try {
 			const result = await saveCanvasState(
 				{
@@ -751,6 +823,7 @@
 				{ remote: canSaveForever }
 			);
 
+			latestCanvasUpdatedAt = result.state.updatedAt;
 			statusMessage =
 				result.target === 'supabase'
 					? 'Saved forever 💌'
@@ -768,6 +841,8 @@
 				{ remote: false }
 			);
 			statusMessage = 'Permanent save failed. A safe local draft was saved instead.';
+		} finally {
+			isSaving = false;
 		}
 	}
 </script>

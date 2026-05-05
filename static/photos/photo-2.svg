@@ -1,9 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 1100">
-  <defs><linearGradient id="g" x1="1" x2="0" y1="0" y2="1"><stop stop-color="#f2e6ff"/><stop offset="1" stop-color="#ffd9e8"/></linearGradient></defs>
-  <rect width="800" height="1100" fill="url(#g)"/>
-  <path d="M0 870c170-170 310-160 430-30 95 103 202 104 370-34v294H0z" fill="#fff" opacity=".35"/>
-  <circle cx="400" cy="360" r="190" fill="#fff" opacity=".45"/>
-  <path d="M400 520S255 425 255 300c0-53 39-91 91-91 25 0 44 12 54 34 10-22 29-34 54-34 52 0 91 38 91 91 0 125-145 220-145 220Z" fill="#b388ff"/>
-  <text x="400" y="925" text-anchor="middle" font-size="58" font-family="Inter, Arial" font-weight="800" fill="#6d3f8f">Photo 2</text>
-  <text x="400" y="990" text-anchor="middle" font-size="30" font-family="Inter, Arial" fill="#7d5b93">Tall memory pin</text>
-</svg>

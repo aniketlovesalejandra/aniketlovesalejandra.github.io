@@ -3,41 +3,41 @@
 	import SpotifyEmbed from './SpotifyEmbed.svelte';
 
 	const letterParagraphs = [
-		'My Alejandra, this little corner of the internet is for us — a place where the date sits at the top, memories can be pinned anywhere, and every tiny drawing becomes part of our story.',
+		'My Alejandra, this little corner of the internet is for us. This is for your birthday :) Our memories and every tiny drawing here can tell our story.',
 		'I made this so we can keep adding photos, stickers, silly sketches, and sweet notes. Every time we come back, the canvas should feel a little more like us.',
-		'You are my favorite person, my calm place, my brightest surprise, and the reason this page exists. I hope every click here reminds you how loved you are.'
+		'You are my favorite person and the reason this website exists. I hope every click here reminds you how much I love you.'
 	];
 
 	const pins = [
 		{
-			src: '/photos/photo-1.svg',
+			src: '/photos/p1.jpg',
 			alt: 'Placeholder memory one',
-			title: 'Memory one',
-			caption: 'Replace this pin with one of your favorite photos together.'
+			title: 'My Love',
+			caption: 'You are my favorite person'
 		},
 		{
-			src: '/photos/photo-2.svg',
+			src: '/photos/p2.jpg',
 			alt: 'Placeholder memory two',
 			title: 'Soft moment',
-			caption: 'A tall Pinterest-style pin for a sweet portrait.'
+			caption: 'Awwwwwww you are soooo cute'
 		},
 		{
-			src: '/photos/photo-3.svg',
+			src: '/photos/p3.jpg',
 			alt: 'Placeholder memory three',
 			title: 'Little adventure',
-			caption: 'This wider card is perfect for a trip or date-night photo.'
+			caption: 'I loved this day'
 		},
 		{
-			src: '/photos/photo-4.svg',
+			src: '/photos/p4.jpg',
 			alt: 'Placeholder memory four',
 			title: 'Favorite laugh',
-			caption: 'Add the picture that always makes both of you smile.'
+			caption: 'hehehehehe'
 		},
 		{
-			src: '/photos/photo-5.svg',
+			src: '/photos/p5.jpg',
 			alt: 'Placeholder memory five',
 			title: 'Forever pin',
-			caption: 'One more memory for the board, ready to be replaced.'
+			caption: 'My stupid girlll'
 		}
 	];
 </script>

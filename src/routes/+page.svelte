@@ -21,11 +21,11 @@
 	<title>For Alejandra</title>
 </svelte:head>
 
-<main class="app-shell">
+<main class="app-shell" class:canvas-view={activeView === 'canvas'}>
 	<header class="date-header" aria-label="Today">
 		<p>Today is</p>
 		<h1>{dateText}</h1>
-		<span>{activeView === 'canvas' ? 'A blank little world for photos, stickers, and pencil notes.' : 'Cake, music, a letter, and five memory pins.'}</span>
+		<span>{activeView === 'canvas' ? 'Drag photos onto the page, write with the pen, or switch to the eraser.' : 'Cake, music, a letter, and five memory pins.'}</span>
 	</header>
 
 	<section class="view-stage" aria-live="polite">
@@ -75,6 +75,7 @@
 
 	.app-shell {
 		position: relative;
+		isolation: isolate;
 		min-height: 100svh;
 		padding: clamp(1rem, 2.5vw, 2rem) clamp(1rem, 4vw, 3rem) 8.5rem;
 	}
@@ -107,6 +108,8 @@
 	}
 
 	.date-header {
+		position: relative;
+		z-index: 20;
 		display: grid;
 		justify-items: center;
 		gap: 0.22rem;
@@ -130,7 +133,7 @@
 		font-size: clamp(2.3rem, 7vw, 6.5rem);
 		font-weight: 950;
 		line-height: 0.92;
-		letter-spacing: -0.09em;
+		letter-spacing: -0.055em;
 		text-wrap: balance;
 		text-shadow: 0 12px 32px rgba(130, 42, 82, 0.12);
 	}
@@ -144,8 +147,19 @@
 	}
 
 	.view-stage {
+		position: relative;
+		z-index: 10;
 		max-width: 1220px;
 		margin: 0 auto;
+	}
+
+	.canvas-view .date-header {
+		pointer-events: none;
+	}
+
+	.canvas-view .view-stage {
+		z-index: 0;
+		max-width: none;
 	}
 
 	@media (max-width: 720px) {

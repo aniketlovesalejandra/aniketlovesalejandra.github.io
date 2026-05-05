@@ -7,21 +7,11 @@
 		loadCanvasState,
 		onAuthChange,
 		saveCanvasState,
-		signInWithEmail,
-		signOut,
 		uploadCanvasImage
 	} from '$lib/services/supabaseClient';
 
-	const stickers = [
-		{ id: 'heart', label: 'Pink heart sticker', src: '/stickers/heart.svg' },
-		{ id: 'sparkle', label: 'Sparkle sticker', src: '/stickers/sparkle.svg' },
-		{ id: 'flower', label: 'Flower sticker', src: '/stickers/flower.svg' },
-		{ id: 'cake', label: 'Cake sticker', src: '/stickers/cake.svg' }
-	];
-
 	let boardEl;
 	let drawingCanvas;
-	let fileInput;
 	let resizeObserver;
 	let saveTimer;
 
@@ -29,28 +19,26 @@
 	let strokes = [];
 	let currentStroke = null;
 	let currentTool = 'pencil';
+	let currentResize = null;
+	let currentDrag = null;
+	let currentRotate = null;
+	let selectedItemId = null;
 	let isDrawing = false;
 	let isUploading = false;
 	let isLoaded = false;
-	let currentDrag = null;
 	let authSession = null;
-	let email = '';
-	let authMessage = '';
 	let statusMessage = 'Loading your forever canvas…';
-	let statusTone = 'neutral';
 
 	const brush = {
 		color: '#9747ff',
 		width: 4
 	};
 
-	$: userEmail = authSession?.user?.email ?? '';
+	const eraser = {
+		width: 28
+	};
+
 	$: canSaveForever = hasSupabaseConfig && Boolean(authSession?.user);
-	$: saveMode = hasSupabaseConfig
-		? canSaveForever
-			? 'saving forever to Supabase'
-			: 'local draft until you sign in'
-		: 'local demo save';
 
 	onMount(async () => {
 		const unsubscribe = onAuthChange((session) => {
@@ -91,20 +79,22 @@
 		return Math.min(max, Math.max(min, value));
 	}
 
+	function normalizeAngle(value) {
+		return ((((value + 180) % 360) + 360) % 360) - 180;
+	}
+
 	async function loadInitialState() {
 		try {
 			const state = await loadCanvasState();
 			items = state.items ?? [];
 			strokes = state.strokes ?? [];
 			isLoaded = true;
-			statusTone = 'success';
 			statusMessage = state.updatedAt
 				? `Loaded the canvas saved ${formatTimestamp(state.updatedAt)}.`
-				: 'Blank canvas ready. Drop a photo, add a sticker, or draw something sweet.';
+				: 'Blank canvas ready. Drop a photo anywhere, or write right on the page.';
 		} catch (error) {
 			console.error('Canvas load failed', error);
 			isLoaded = true;
-			statusTone = 'error';
 			statusMessage = 'Could not load the permanent canvas. A local draft canvas is ready.';
 		}
 	}
@@ -157,19 +147,24 @@
 		const points = stroke.points ?? [];
 		if (!points.length) return;
 
+		const isEraser = stroke.tool === 'eraser';
+		const strokeWidth = stroke.width ?? (isEraser ? eraser.width : brush.width);
+		const strokeColor = isEraser ? 'rgba(0, 0, 0, 1)' : (stroke.color ?? brush.color);
+
 		context.save();
+		context.globalCompositeOperation = isEraser ? 'destination-out' : 'source-over';
 		context.lineCap = 'round';
 		context.lineJoin = 'round';
-		context.strokeStyle = stroke.color ?? brush.color;
-		context.fillStyle = stroke.color ?? brush.color;
-		context.lineWidth = stroke.width ?? brush.width;
+		context.strokeStyle = strokeColor;
+		context.fillStyle = strokeColor;
+		context.lineWidth = strokeWidth;
 
 		const first = points[0];
 		context.beginPath();
 		context.moveTo(first.x * rect.width, first.y * rect.height);
 
 		if (points.length === 1) {
-			context.arc(first.x * rect.width, first.y * rect.height, (stroke.width ?? brush.width) / 2, 0, Math.PI * 2);
+			context.arc(first.x * rect.width, first.y * rect.height, strokeWidth / 2, 0, Math.PI * 2);
 			context.fill();
 			context.restore();
 			return;
@@ -191,16 +186,24 @@
 		};
 	}
 
+	function setTool(tool) {
+		currentTool = tool;
+	}
+
 	function startDrawing(event) {
-		if (currentTool !== 'pencil' || !isLoaded) return;
+		if (!isLoaded) return;
 
 		event.preventDefault();
+		selectedItemId = null;
 		drawingCanvas.setPointerCapture?.(event.pointerId);
+		const tool = currentTool === 'eraser' ? 'eraser' : 'pencil';
+		const isEraser = tool === 'eraser';
 		isDrawing = true;
 		currentStroke = {
 			id: createId('stroke'),
+			tool,
 			color: brush.color,
-			width: brush.width,
+			width: isEraser ? eraser.width : brush.width,
 			points: [getPointerPoint(event)]
 		};
 		redrawAll(currentStroke);
@@ -229,13 +232,13 @@
 		scheduleSave();
 	}
 
-	function itemStyle(item) {
+	function itemStyle(item, zOffset = 0) {
 		return [
 			`left: ${item.x}%`,
 			`top: ${item.y}%`,
 			`width: ${item.width}%`,
 			`transform: rotate(${item.rotation ?? 0}deg)`,
-			`z-index: ${item.z ?? 1}`
+			`z-index: ${(item.z ?? 1) + zOffset}`
 		].join('; ');
 	}
 
@@ -243,50 +246,229 @@
 		return Math.max(1, ...items.map((item) => item.z ?? 1)) + 1;
 	}
 
-	function startItemDrag(event, item) {
-		if (currentTool !== 'move') return;
-
+	function selectImage(event, item) {
 		event.preventDefault();
-		event.currentTarget.setPointerCapture?.(event.pointerId);
-		const rect = boardEl.getBoundingClientRect();
-		const itemLeft = (item.x / 100) * rect.width;
-		const itemTop = (item.y / 100) * rect.height;
+		event.stopPropagation();
+		selectedItemId = item.id;
+		statusMessage = 'Image selected. Drag it, rotate it, resize it, or remove it.';
+	}
 
+	function startImageDrag(event, item) {
+		event.preventDefault();
+		event.stopPropagation();
+		event.currentTarget.setPointerCapture?.(event.pointerId);
+		selectedItemId = item.id;
+
+		const rect = boardEl.getBoundingClientRect();
+		const z = nextZIndex();
 		currentDrag = {
 			id: item.id,
 			pointerId: event.pointerId,
-			offsetX: event.clientX - rect.left - itemLeft,
-			offsetY: event.clientY - rect.top - itemTop
+			startClientX: event.clientX,
+			startClientY: event.clientY,
+			startX: item.x,
+			startY: item.y,
+			width: item.width,
+			boardWidth: rect.width,
+			boardHeight: rect.height,
+			moved: false
 		};
 
-		const z = nextZIndex();
 		items = items.map((canvasItem) => (canvasItem.id === item.id ? { ...canvasItem, z } : canvasItem));
 	}
 
-	function dragItem(event) {
+	function dragImage(event) {
 		if (!currentDrag || event.pointerId !== currentDrag.pointerId) return;
 
 		event.preventDefault();
-		const rect = boardEl.getBoundingClientRect();
-		const nextX = ((event.clientX - rect.left - currentDrag.offsetX) / rect.width) * 100;
-		const nextY = ((event.clientY - rect.top - currentDrag.offsetY) / rect.height) * 100;
+		event.stopPropagation();
+		const deltaX = ((event.clientX - currentDrag.startClientX) / currentDrag.boardWidth) * 100;
+		const deltaY = ((event.clientY - currentDrag.startClientY) / currentDrag.boardHeight) * 100;
+		const moved = currentDrag.moved || Math.abs(deltaX) > 0.25 || Math.abs(deltaY) > 0.25;
+		const maxX = Math.max(0, 100 - currentDrag.width);
+		currentDrag = { ...currentDrag, moved };
 
 		items = items.map((item) =>
 			item.id === currentDrag.id
 				? {
 						...item,
-						x: clamp(nextX, 0, 92),
-						y: clamp(nextY, 0, 90)
+						x: clamp(currentDrag.startX + deltaX, 0, maxX),
+						y: clamp(currentDrag.startY + deltaY, 0, 90)
 					}
 				: item
 		);
 	}
 
-	function endItemDrag(event) {
+	function endImageDrag(event) {
 		if (!currentDrag || event.pointerId !== currentDrag.pointerId) return;
 
+		event.preventDefault();
+		event.stopPropagation();
 		event.currentTarget.releasePointerCapture?.(event.pointerId);
+		const moved = currentDrag.moved;
 		currentDrag = null;
+
+		if (moved) {
+			statusMessage = 'Image moved.';
+			scheduleSave();
+		}
+	}
+
+	function handleImageKeydown(event, item) {
+		const step = event.shiftKey ? 5 : 2;
+		let nextX = item.x;
+		let nextY = item.y;
+
+		if (event.key === 'ArrowRight') {
+			nextX = clamp(item.x + step, 0, Math.max(0, 100 - item.width));
+		} else if (event.key === 'ArrowLeft') {
+			nextX = clamp(item.x - step, 0, Math.max(0, 100 - item.width));
+		} else if (event.key === 'ArrowDown') {
+			nextY = clamp(item.y + step, 0, 90);
+		} else if (event.key === 'ArrowUp') {
+			nextY = clamp(item.y - step, 0, 90);
+		} else {
+			return;
+		}
+
+		event.preventDefault();
+		event.stopPropagation();
+		selectedItemId = item.id;
+		items = items.map((canvasItem) => (canvasItem.id === item.id ? { ...canvasItem, x: nextX, y: nextY } : canvasItem));
+		statusMessage = 'Image moved.';
+		scheduleSave();
+	}
+
+	function removeImage(itemId) {
+		items = items.filter((item) => item.id !== itemId);
+		if (selectedItemId === itemId) {
+			selectedItemId = null;
+		}
+		statusMessage = 'Image removed.';
+		scheduleSave();
+	}
+
+	function startImageResize(event, item) {
+		event.preventDefault();
+		event.stopPropagation();
+		event.currentTarget.setPointerCapture?.(event.pointerId);
+		selectedItemId = item.id;
+
+		const rect = boardEl.getBoundingClientRect();
+		currentResize = {
+			id: item.id,
+			pointerId: event.pointerId,
+			startX: event.clientX,
+			startWidth: item.width,
+			boardWidth: rect.width
+		};
+	}
+
+	function resizeImage(event) {
+		if (!currentResize || event.pointerId !== currentResize.pointerId) return;
+
+		event.preventDefault();
+		event.stopPropagation();
+		const deltaPercent = ((event.clientX - currentResize.startX) / currentResize.boardWidth) * 100;
+		const width = clamp(currentResize.startWidth + deltaPercent, 8, 72);
+		items = items.map((item) => (item.id === currentResize.id ? { ...item, width } : item));
+	}
+
+	function endImageResize(event) {
+		if (!currentResize || event.pointerId !== currentResize.pointerId) return;
+
+		event.preventDefault();
+		event.stopPropagation();
+		event.currentTarget.releasePointerCapture?.(event.pointerId);
+		currentResize = null;
+		statusMessage = 'Image resized.';
+		scheduleSave();
+	}
+
+	function handleResizeKeydown(event, item) {
+		const step = event.shiftKey ? 5 : 2;
+		let width = item.width;
+
+		if (event.key === 'ArrowRight' || event.key === 'ArrowUp') {
+			width = clamp(item.width + step, 8, 72);
+		} else if (event.key === 'ArrowLeft' || event.key === 'ArrowDown') {
+			width = clamp(item.width - step, 8, 72);
+		} else {
+			return;
+		}
+
+		event.preventDefault();
+		items = items.map((canvasItem) => (canvasItem.id === item.id ? { ...canvasItem, width } : canvasItem));
+		statusMessage = 'Image resized.';
+		scheduleSave();
+	}
+
+	function pointerAngle(event, center) {
+		return (Math.atan2(event.clientY - center.y, event.clientX - center.x) * 180) / Math.PI;
+	}
+
+	function startImageRotate(event, item) {
+		event.preventDefault();
+		event.stopPropagation();
+		event.currentTarget.setPointerCapture?.(event.pointerId);
+		selectedItemId = item.id;
+
+		const imageRect = event.currentTarget.parentElement?.querySelector('.control-measure')?.getBoundingClientRect();
+		if (!imageRect) return;
+
+		const center = {
+			x: imageRect.left + imageRect.width / 2,
+			y: imageRect.top + imageRect.height / 2
+		};
+
+		currentRotate = {
+			id: item.id,
+			pointerId: event.pointerId,
+			center,
+			startAngle: pointerAngle(event, center),
+			startRotation: item.rotation ?? 0
+		};
+	}
+
+	function rotateImage(event) {
+		if (!currentRotate || event.pointerId !== currentRotate.pointerId) return;
+
+		event.preventDefault();
+		event.stopPropagation();
+		const nextAngle = pointerAngle(event, currentRotate.center);
+		const delta = normalizeAngle(nextAngle - currentRotate.startAngle);
+		const rotation = Math.round(normalizeAngle(currentRotate.startRotation + delta) * 10) / 10;
+		items = items.map((item) => (item.id === currentRotate.id ? { ...item, rotation } : item));
+	}
+
+	function endImageRotate(event) {
+		if (!currentRotate || event.pointerId !== currentRotate.pointerId) return;
+
+		event.preventDefault();
+		event.stopPropagation();
+		event.currentTarget.releasePointerCapture?.(event.pointerId);
+		currentRotate = null;
+		statusMessage = 'Image rotated.';
+		scheduleSave();
+	}
+
+	function handleRotateKeydown(event, item) {
+		const step = event.shiftKey ? 15 : 5;
+		let rotation = item.rotation ?? 0;
+
+		if (event.key === 'ArrowRight' || event.key === 'ArrowUp') {
+			rotation = normalizeAngle(rotation + step);
+		} else if (event.key === 'ArrowLeft' || event.key === 'ArrowDown') {
+			rotation = normalizeAngle(rotation - step);
+		} else {
+			return;
+		}
+
+		event.preventDefault();
+		event.stopPropagation();
+		selectedItemId = item.id;
+		items = items.map((canvasItem) => (canvasItem.id === item.id ? { ...canvasItem, rotation } : canvasItem));
+		statusMessage = 'Image rotated.';
 		scheduleSave();
 	}
 
@@ -303,103 +485,54 @@
 		await addFiles(Array.from(event.dataTransfer.files), { x, y });
 	}
 
-	async function handleFileInput(event) {
-		await addFiles(Array.from(event.currentTarget.files ?? []), { x: 38, y: 32 });
-		event.currentTarget.value = '';
-	}
-
 	async function addFiles(files, placement) {
 		const imageFiles = files.filter((file) => file.type.startsWith('image/'));
 		if (!imageFiles.length) {
-			statusTone = 'error';
-			statusMessage = 'Please choose an image file.';
+			statusMessage = 'Drop an image file onto the canvas.';
 			return;
 		}
 
 		isUploading = true;
-		statusTone = 'neutral';
 		statusMessage = canSaveForever ? 'Uploading image forever…' : 'Adding image as a local draft…';
 
-		const addedItems = [];
-		for (const [index, file] of imageFiles.entries()) {
-			let src;
+		try {
+			const addedItems = [];
+			for (const [index, file] of imageFiles.entries()) {
+				let src;
 
-			try {
-				src = await uploadCanvasImage(file, { remote: canSaveForever });
-			} catch (error) {
-				console.error('Image upload failed, using local draft', error);
-				src = await fileToDataUrl(file);
-				statusTone = 'error';
-				statusMessage = 'Upload failed, so the image was added as a local draft.';
+				try {
+					src = await uploadCanvasImage(file, { remote: canSaveForever });
+				} catch (error) {
+					console.error('Image upload failed, using local draft', error);
+					src = await fileToDataUrl(file);
+					statusMessage = 'Upload failed, so the image was added as a local draft.';
+				}
+
+				addedItems.push({
+					id: createId('image'),
+					type: 'image',
+					src,
+					alt: file.name || 'Dropped canvas image',
+					x: clamp(placement.x + index * 3, 4, 82),
+					y: clamp(placement.y + index * 3, 4, 78),
+					width: 24,
+					rotation: index % 2 === 0 ? -2 : 2,
+					z: nextZIndex() + index
+				});
 			}
 
-			addedItems.push({
-				id: createId('image'),
-				type: 'image',
-				src,
-				alt: file.name || 'Dropped canvas image',
-				x: clamp(placement.x + index * 3, 4, 82),
-				y: clamp(placement.y + index * 3, 4, 78),
-				width: 24,
-				rotation: index % 2 === 0 ? -2 : 2,
-				z: nextZIndex() + index
-			});
-		}
-
-		items = [...items, ...addedItems];
-		isUploading = false;
-		currentTool = 'move';
-		scheduleSave();
-	}
-
-	function addSticker(sticker) {
-		items = [
-			...items,
-			{
-				id: createId('sticker'),
-				type: 'sticker',
-				src: sticker.src,
-				alt: sticker.label,
-				x: 42 + Math.random() * 8,
-				y: 34 + Math.random() * 10,
-				width: 12,
-				rotation: -8 + Math.random() * 16,
-				z: nextZIndex()
-			}
-		];
-		currentTool = 'move';
-		scheduleSave();
-	}
-
-	function undoLast() {
-		if (strokes.length) {
-			strokes = strokes.slice(0, -1);
-			redrawAll(null);
+			items = [...items, ...addedItems];
+			selectedItemId = null;
 			scheduleSave();
-			return;
+		} finally {
+			isUploading = false;
 		}
-
-		if (items.length) {
-			const topItem = items.reduce((top, item) => ((item.z ?? 0) > (top.z ?? 0) ? item : top), items[0]);
-			items = items.filter((item) => item.id !== topItem.id);
-			scheduleSave();
-		}
-	}
-
-	function clearCanvas() {
-		if (!window.confirm('Clear every drawing, photo, and sticker from this canvas?')) return;
-
-		items = [];
-		strokes = [];
-		redrawAll(null);
-		scheduleSave();
 	}
 
 	function scheduleSave() {
 		if (!isLoaded) return;
 
 		window.clearTimeout(saveTimer);
-		statusTone = 'neutral';
 		statusMessage = canSaveForever ? 'Saving this to the forever canvas…' : 'Saving a local draft…';
 
 		saveTimer = window.setTimeout(persistCanvasState, 650);
@@ -416,7 +549,6 @@
 				{ remote: canSaveForever }
 			);
 
-			statusTone = 'success';
 			statusMessage =
 				result.target === 'supabase'
 					? 'Saved forever 💌'
@@ -433,314 +565,137 @@
 				},
 				{ remote: false }
 			);
-			statusTone = 'error';
 			statusMessage = 'Permanent save failed. A safe local draft was saved instead.';
-		}
-	}
-
-	async function requestMagicLink() {
-		if (!email.trim()) {
-			authMessage = 'Enter the email that is allowed to save this canvas.';
-			return;
-		}
-
-		authMessage = 'Sending magic link…';
-
-		try {
-			const { error } = await signInWithEmail(email.trim());
-			if (error) throw error;
-			authMessage = 'Magic link sent. Open it here to unlock forever saves.';
-		} catch (error) {
-			console.error('Magic link failed', error);
-			authMessage = error.message ?? 'Could not send the magic link.';
-		}
-	}
-
-	async function handleSignOut() {
-		try {
-			await signOut();
-			authMessage = 'Signed out.';
-		} catch (error) {
-			authMessage = error.message ?? 'Could not sign out.';
 		}
 	}
 </script>
 
 <section class="canvas-shell" aria-label="Forever drawing canvas">
-	<div class="toolbar-card">
-		<div class="toolbar-row">
-			<div class="tool-group" aria-label="Canvas tools">
-				<button type="button" class:active={currentTool === 'pencil'} on:click={() => (currentTool = 'pencil')}>
-					✏️ Pencil
-				</button>
-				<button type="button" class:active={currentTool === 'move'} on:click={() => (currentTool = 'move')}>
-					🖐️ Move
-				</button>
-			</div>
-
-			<div class="tool-group">
-				<button type="button" on:click={() => fileInput.click()} disabled={isUploading}>
-					{isUploading ? 'Adding…' : 'Add image'}
-				</button>
-				<input bind:this={fileInput} class="hidden-input" type="file" accept="image/*" multiple on:change={handleFileInput} />
-				<button type="button" on:click={undoLast} disabled={!items.length && !strokes.length}>Undo</button>
-				<button type="button" class="danger" on:click={clearCanvas} disabled={!items.length && !strokes.length}>Clear</button>
-			</div>
-		</div>
-
-		<div class="sticker-row" aria-label="Sticker palette">
-			<span>Stickers</span>
-			{#each stickers as sticker}
-				<button type="button" class="sticker-button" on:click={() => addSticker(sticker)} aria-label={`Add ${sticker.label}`}>
-					<img src={sticker.src} alt="" />
-				</button>
-			{/each}
-		</div>
-	</div>
-
-	<div class="auth-card">
-		{#if hasSupabaseConfig}
-			{#if userEmail}
-				<div>
-					<strong>Forever saves unlocked</strong>
-					<span>Signed in as {userEmail}</span>
-				</div>
-				<button type="button" on:click={handleSignOut}>Sign out</button>
-			{:else}
-				<div>
-					<strong>Sign in to save forever</strong>
-					<span>Your edits are drafts until an allowed email signs in.</span>
-				</div>
-				<label>
-					<span class="sr-only">Allowed email</span>
-					<input bind:value={email} type="email" placeholder="you@example.com" />
-				</label>
-				<button type="button" on:click={requestMagicLink}>Send link</button>
-			{/if}
-		{:else}
-			<div>
-				<strong>Local demo mode</strong>
-				<span>Add Supabase keys to make every upload permanent for both of you.</span>
-			</div>
-		{/if}
-	</div>
-
-	{#if authMessage}
-		<p class="auth-message">{authMessage}</p>
-	{/if}
-
 	<div class="board-frame">
 		<div
 			bind:this={boardEl}
 			class="canvas-board"
-			class:pencil-active={currentTool === 'pencil'}
+			role="region"
+			aria-label="Full-page drawing and drop canvas"
 			on:dragover={handleDragOver}
 			on:drop={handleDrop}
 		>
 			<canvas
 				bind:this={drawingCanvas}
 				class="drawing-layer"
-				class:drawing-enabled={currentTool === 'pencil'}
+				class:eraser-enabled={currentTool === 'eraser'}
 				on:pointerdown={startDrawing}
 				on:pointermove={continueDrawing}
 				on:pointerup={endDrawing}
 				on:pointercancel={endDrawing}
-				aria-label="Pencil drawing layer"
+				aria-label="Always-on drawing layer"
 			/>
 
 			{#each items as item (item.id)}
-				<button
-					type="button"
-					class="canvas-item"
-					class:movable={currentTool === 'move'}
-					style={itemStyle(item)}
-					on:pointerdown={(event) => startItemDrag(event, item)}
-					on:pointermove={dragItem}
-					on:pointerup={endItemDrag}
-					on:pointercancel={endItemDrag}
-					aria-label={`Move ${item.alt ?? item.type}`}
-				>
+				<div class="canvas-item" style={itemStyle(item)}>
 					<img src={item.src} alt={item.alt ?? ''} draggable="false" />
-				</button>
+				</div>
 			{/each}
+
+			<div class="image-controls-layer" aria-label="Image controls">
+				{#each items as item (item.id)}
+					<div class="image-controls" class:selected={selectedItemId === item.id} style={itemStyle(item, 20)}>
+						<img class="control-measure" src={item.src} alt="" draggable="false" />
+						<button
+							type="button"
+							class="select-image"
+							on:pointerdown={(event) => startImageDrag(event, item)}
+							on:pointermove={dragImage}
+							on:pointerup={endImageDrag}
+							on:pointercancel={endImageDrag}
+							on:click={(event) => selectImage(event, item)}
+							on:keydown={(event) => handleImageKeydown(event, item)}
+							aria-label={`Select or drag ${item.alt ?? 'image'}`}
+						>
+							<span class="sr-only">Select {item.alt ?? 'image'}</span>
+						</button>
+						{#if selectedItemId === item.id}
+							<button type="button" class="remove-image" on:click={() => removeImage(item.id)} aria-label={`Remove ${item.alt ?? 'image'}`}>
+								×
+							</button>
+							<button
+								type="button"
+								class="rotate-image"
+								on:pointerdown={(event) => startImageRotate(event, item)}
+								on:pointermove={rotateImage}
+								on:pointerup={endImageRotate}
+								on:pointercancel={endImageRotate}
+								on:keydown={(event) => handleRotateKeydown(event, item)}
+								aria-label={`Rotate ${item.alt ?? 'image'}`}
+							>
+								⟳
+							</button>
+							<button
+								type="button"
+								class="resize-image"
+								on:pointerdown={(event) => startImageResize(event, item)}
+								on:pointermove={resizeImage}
+								on:pointerup={endImageResize}
+								on:pointercancel={endImageResize}
+								on:keydown={(event) => handleResizeKeydown(event, item)}
+								aria-label={`Resize ${item.alt ?? 'image'}`}
+							>
+								↘
+							</button>
+						{/if}
+					</div>
+				{/each}
+			</div>
 
 			{#if !items.length && !strokes.length}
 				<div class="empty-state" aria-hidden="true">
-					<div>Drop a picture here</div>
-					<span>or draw a tiny love note with the pencil</span>
+					<div>{isUploading ? 'Adding your picture…' : 'Drop a picture anywhere'}</div>
+					<span>Then write directly on the page</span>
 				</div>
 			{/if}
 		</div>
 	</div>
 
-	<p class:success={statusTone === 'success'} class:error={statusTone === 'error'} class="status-line">
-		<span>{statusMessage}</span>
-		<small>{saveMode}</small>
-	</p>
+	<div class="drawing-tools" aria-label="Drawing tools">
+		<button type="button" class:active={currentTool === 'pencil'} aria-pressed={currentTool === 'pencil'} on:click={() => setTool('pencil')}>
+			✏️ Pen
+		</button>
+		<button type="button" class:active={currentTool === 'eraser'} aria-pressed={currentTool === 'eraser'} on:click={() => setTool('eraser')}>
+			🧽 Eraser
+		</button>
+	</div>
+
+	<p class="sr-only" aria-live="polite">{statusMessage}</p>
 </section>
 
 <style>
 	.canvas-shell {
-		display: grid;
-		gap: 1rem;
-		min-height: min(72vh, 54rem);
-	}
-
-	.toolbar-card,
-	.auth-card {
-		border: 1px solid rgba(255, 255, 255, 0.72);
-		border-radius: 1.4rem;
-		background: rgba(255, 255, 255, 0.72);
-		box-shadow: 0 18px 45px rgba(153, 48, 98, 0.1);
-		backdrop-filter: blur(18px);
-	}
-
-	.toolbar-card {
-		display: grid;
-		gap: 0.75rem;
-		padding: 0.8rem;
-	}
-
-	.toolbar-row,
-	.sticker-row,
-	.auth-card {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: 0.75rem;
-		flex-wrap: wrap;
-	}
-
-	.tool-group {
-		display: flex;
-		gap: 0.45rem;
-		align-items: center;
-		flex-wrap: wrap;
-	}
-
-	button {
-		border: 0;
-		border-radius: 999px;
-		padding: 0.65rem 0.9rem;
-		font: inherit;
-		font-weight: 800;
-		color: #6b2842;
-		background: #fff;
-		box-shadow: 0 10px 24px rgba(160, 50, 100, 0.13);
-		cursor: pointer;
-		transition: transform 160ms ease, box-shadow 160ms ease, background 160ms ease;
-	}
-
-	button:hover:not(:disabled),
-	button:focus-visible:not(:disabled) {
-		transform: translateY(-1px);
-		box-shadow: 0 14px 30px rgba(160, 50, 100, 0.18);
-		outline: none;
-	}
-
-	button.active {
-		color: #fff;
-		background: linear-gradient(135deg, #ff5f9f, #9d6bff);
-	}
-
-	button.danger {
-		color: #9b244b;
-		background: #fff0f5;
-	}
-
-	button:disabled {
-		opacity: 0.5;
-		cursor: not-allowed;
-	}
-
-	.hidden-input {
-		position: absolute;
-		inline-size: 1px;
-		block-size: 1px;
-		overflow: hidden;
-		clip: rect(0 0 0 0);
-		white-space: nowrap;
-	}
-
-	.sticker-row {
-		justify-content: flex-start;
-	}
-
-	.sticker-row > span {
-		font-weight: 900;
-		color: #7a304c;
-	}
-
-	.sticker-button {
-		display: grid;
-		place-items: center;
-		width: 3.2rem;
-		height: 3.2rem;
-		padding: 0.4rem;
-		background: linear-gradient(145deg, #fff, #fff0f7);
-	}
-
-	.sticker-button img {
-		width: 100%;
-		height: 100%;
-		object-fit: contain;
-	}
-
-	.auth-card {
-		padding: 0.85rem 1rem;
-		color: #6b2842;
-	}
-
-	.auth-card div {
-		display: grid;
-		gap: 0.15rem;
-	}
-
-	.auth-card strong {
-		font-size: 0.95rem;
-	}
-
-	.auth-card span,
-	.auth-message,
-	.status-line small {
-		color: #8b5268;
-		font-size: 0.86rem;
-	}
-
-	.auth-card input {
-		min-width: min(16rem, 62vw);
-		border: 1px solid rgba(255, 116, 166, 0.28);
-		border-radius: 999px;
-		padding: 0.72rem 0.9rem;
-		font: inherit;
-		color: #5a2035;
-		background: rgba(255, 255, 255, 0.86);
-	}
-
-	.auth-message {
-		margin: -0.35rem 0 0;
+		position: fixed;
+		inset: 0;
+		z-index: 10;
+		pointer-events: none;
 	}
 
 	.board-frame {
-		min-height: clamp(28rem, 64vh, 48rem);
-		padding: clamp(0.35rem, 1vw, 0.8rem);
-		border: 1px solid rgba(255, 255, 255, 0.7);
-		border-radius: 2rem;
-		background: linear-gradient(135deg, rgba(255, 255, 255, 0.72), rgba(255, 238, 247, 0.5));
-		box-shadow: 0 28px 75px rgba(124, 40, 82, 0.14);
+		position: fixed;
+		inset: 0;
+		z-index: 0;
+		min-height: 100svh;
+		pointer-events: auto;
 	}
 
 	.canvas-board {
 		position: relative;
 		isolation: isolate;
 		overflow: hidden;
-		min-height: inherit;
-		border: 1px dashed rgba(255, 115, 166, 0.32);
-		border-radius: 1.55rem;
+		width: 100vw;
+		height: 100svh;
+		min-height: 100svh;
 		background:
-			radial-gradient(circle at 10% 12%, rgba(255, 199, 218, 0.35), transparent 24rem),
-			radial-gradient(circle at 88% 18%, rgba(179, 136, 255, 0.18), transparent 20rem),
-			#fffefe;
+			radial-gradient(circle at 10% 12%, rgba(255, 199, 218, 0.38), transparent 24rem),
+			radial-gradient(circle at 88% 18%, rgba(179, 136, 255, 0.22), transparent 20rem),
+			radial-gradient(circle at 50% 92%, rgba(255, 111, 160, 0.16), transparent 24rem),
+			linear-gradient(135deg, #fff7fb 0%, #ffe4ef 45%, #f9edff 100%);
 	}
 
 	.canvas-board::before {
@@ -756,37 +711,27 @@
 	.drawing-layer {
 		position: absolute;
 		inset: 0;
-		z-index: 2;
+		z-index: 4;
 		touch-action: none;
-		pointer-events: none;
-	}
-
-	.drawing-layer.drawing-enabled {
-		cursor: crosshair;
 		pointer-events: auto;
+		cursor: crosshair;
 	}
 
-	.canvas-item {
+	.drawing-layer.eraser-enabled {
+		cursor: cell;
+	}
+
+	.canvas-item,
+	.image-controls {
 		position: absolute;
-		z-index: 3;
 		display: block;
 		min-width: 4rem;
-		padding: 0;
-		border-radius: 1rem;
-		background: transparent;
-		box-shadow: none;
-		pointer-events: none;
-		touch-action: none;
 		transform-origin: center;
 	}
 
-	.canvas-item.movable {
-		cursor: grab;
-		pointer-events: auto;
-	}
-
-	.canvas-item.movable:active {
-		cursor: grabbing;
+	.canvas-item {
+		z-index: 3;
+		pointer-events: none;
 	}
 
 	.canvas-item img {
@@ -799,10 +744,116 @@
 		-webkit-user-drag: none;
 	}
 
-	.canvas-item:hover img,
-	.canvas-item:focus-visible img {
-		outline: 3px solid rgba(255, 95, 159, 0.35);
+	.image-controls-layer {
+		position: absolute;
+		inset: 0;
+		z-index: 5;
+		pointer-events: none;
+	}
+
+	.image-controls {
+		pointer-events: none;
+	}
+
+	.image-controls.selected {
+		filter: drop-shadow(0 0 0.7rem rgba(255, 95, 159, 0.18));
+	}
+
+	.control-measure {
+		display: block;
+		width: 100%;
+		height: auto;
+		opacity: 0;
+		pointer-events: none;
+		user-select: none;
+		-webkit-user-drag: none;
+	}
+
+	.select-image {
+		position: absolute;
+		inset: 0;
+		z-index: 0;
+		display: block;
+		width: 100%;
+		height: 100%;
+		padding: 0;
+		border: 0;
+		border-radius: 1rem;
+		background: transparent;
+		box-shadow: none;
+		cursor: grab;
+		pointer-events: auto;
+	}
+
+	.select-image:active {
+		cursor: grabbing;
+	}
+
+	.select-image:hover,
+	.select-image:focus-visible,
+	.image-controls.selected .select-image {
+		outline: 3px solid rgba(255, 95, 159, 0.45);
 		outline-offset: 4px;
+	}
+
+	.remove-image,
+	.rotate-image,
+	.resize-image {
+		position: absolute;
+		z-index: 1;
+		display: grid;
+		place-items: center;
+		width: 2rem;
+		height: 2rem;
+		padding: 0;
+		border: 0;
+		border-radius: 999px;
+		font: inherit;
+		font-size: 1.1rem;
+		font-weight: 950;
+		line-height: 1;
+		color: #fff;
+		background: linear-gradient(135deg, #ff5f9f, #9d6bff);
+		box-shadow: 0 12px 28px rgba(111, 39, 78, 0.25), inset 0 1px 0 rgba(255, 255, 255, 0.5);
+		cursor: pointer;
+		opacity: 0.82;
+		pointer-events: auto;
+		transition: transform 160ms ease, opacity 160ms ease, box-shadow 160ms ease;
+	}
+
+	.remove-image {
+		top: -0.8rem;
+		right: -0.8rem;
+	}
+
+	.rotate-image {
+		left: -0.8rem;
+		bottom: -0.8rem;
+		cursor: grab;
+		touch-action: none;
+	}
+
+	.rotate-image:active {
+		cursor: grabbing;
+	}
+
+	.resize-image {
+		right: -0.8rem;
+		bottom: -0.8rem;
+		cursor: nwse-resize;
+		touch-action: none;
+	}
+
+	.remove-image:hover,
+	.remove-image:focus-visible,
+	.rotate-image:hover,
+	.rotate-image:focus-visible,
+	.resize-image:hover,
+	.resize-image:focus-visible {
+		transform: scale(1.08);
+		opacity: 1;
+		box-shadow: 0 16px 34px rgba(111, 39, 78, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.5);
+		outline: none;
 	}
 
 	.empty-state {
@@ -828,23 +879,46 @@
 		letter-spacing: 0.02em;
 	}
 
-	.status-line {
+	.drawing-tools {
+		position: fixed;
+		left: 50%;
+		bottom: max(7.25rem, calc(env(safe-area-inset-bottom) + 6.75rem));
+		z-index: 6;
 		display: flex;
-		justify-content: space-between;
-		gap: 1rem;
-		flex-wrap: wrap;
-		margin: 0;
-		padding: 0 0.25rem;
-		color: #79435a;
-		font-weight: 800;
+		gap: 0.55rem;
+		padding: 0.55rem;
+		border: 1px solid rgba(255, 255, 255, 0.68);
+		border-radius: 999px;
+		background: linear-gradient(135deg, rgba(255, 255, 255, 0.66), rgba(255, 226, 240, 0.76));
+		box-shadow: 0 24px 70px rgba(150, 44, 92, 0.18), inset 0 1px 0 rgba(255, 255, 255, 0.95);
+		backdrop-filter: blur(22px) saturate(1.4);
+		pointer-events: auto;
+		transform: translateX(-50%);
 	}
 
-	.status-line.success span {
-		color: #2f7a55;
+	.drawing-tools button {
+		border: 0;
+		border-radius: 999px;
+		padding: 0.65rem 0.95rem;
+		font: inherit;
+		font-weight: 850;
+		color: #6b2842;
+		background: rgba(255, 255, 255, 0.92);
+		box-shadow: 0 10px 24px rgba(160, 50, 100, 0.13), inset 0 1px 0 #fff;
+		cursor: pointer;
+		transition: transform 160ms ease, box-shadow 160ms ease, background 160ms ease;
 	}
 
-	.status-line.error span {
-		color: #a22b50;
+	.drawing-tools button:hover,
+	.drawing-tools button:focus-visible {
+		transform: translateY(-1px);
+		box-shadow: 0 14px 30px rgba(160, 50, 100, 0.18), inset 0 1px 0 #fff;
+		outline: none;
+	}
+
+	.drawing-tools button.active {
+		color: #fff;
+		background: linear-gradient(135deg, #ff5f9f, #9d6bff);
 	}
 
 	.sr-only {
@@ -860,27 +934,18 @@
 	}
 
 	@media (max-width: 720px) {
-		.toolbar-row,
-		.auth-card,
-		.status-line {
-			align-items: stretch;
-			flex-direction: column;
+		.drawing-tools {
+			bottom: max(6.2rem, calc(env(safe-area-inset-bottom) + 5.8rem));
+			gap: 0.4rem;
+			padding: 0.45rem;
 		}
 
-		.tool-group {
-			width: 100%;
+		.drawing-tools button {
+			padding: 0.62rem 0.8rem;
 		}
 
-		.tool-group button,
-		.auth-card button {
-			flex: 1;
-		}
-
-		.board-frame {
-			min-height: 62vh;
-		}
-
-		.canvas-item {
+		.canvas-item,
+		.image-controls {
 			min-width: 3rem;
 		}
 	}

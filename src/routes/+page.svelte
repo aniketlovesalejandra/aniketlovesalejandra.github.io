@@ -1,8 +1,3 @@
-<script context="module">
-	export const prerender = true;
-	export const ssr = false;
-</script>
-
 <script>
 	import CanvasBoard from '$lib/components/CanvasBoard.svelte';
 	import DockNav from '$lib/components/DockNav.svelte';

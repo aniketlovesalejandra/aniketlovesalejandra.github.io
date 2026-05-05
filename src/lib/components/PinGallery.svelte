@@ -16,21 +16,24 @@
 
 <style>
 	.pin-gallery {
-		columns: 3 14rem;
-		column-gap: 1rem;
+		display: grid;
+		grid-template-columns: repeat(3, minmax(0, 1fr));
+		gap: 1rem;
+		align-items: start;
 	}
 
 	.pin {
-		display: inline-block;
+		position: relative;
+		display: grid;
 		width: 100%;
-		margin: 0 0 1rem;
-		break-inside: avoid;
+		margin: 0;
 		overflow: hidden;
 		border: 1px solid rgba(255, 255, 255, 0.75);
 		border-radius: 1.35rem;
 		background: rgba(255, 255, 255, 0.85);
 		box-shadow: 0 18px 44px rgba(116, 37, 72, 0.14);
 		transform: rotate(var(--tilt, -1deg));
+		transform-origin: center;
 		transition: transform 180ms ease, box-shadow 180ms ease;
 	}
 
@@ -43,8 +46,13 @@
 	}
 
 	.pin:hover {
+		z-index: 2;
 		transform: translateY(-0.3rem) rotate(0deg);
 		box-shadow: 0 24px 56px rgba(116, 37, 72, 0.2);
+	}
+
+	.pin.wide {
+		grid-column: span 2;
 	}
 
 	.pin img {
@@ -82,13 +90,17 @@
 
 	@media (max-width: 720px) {
 		.pin-gallery {
-			columns: 2 10rem;
+			grid-template-columns: repeat(2, minmax(0, 1fr));
 		}
 	}
 
 	@media (max-width: 460px) {
 		.pin-gallery {
-			columns: 1;
+			grid-template-columns: 1fr;
+		}
+
+		.pin.wide {
+			grid-column: auto;
 		}
 	}
 </style>

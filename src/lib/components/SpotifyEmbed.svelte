@@ -59,4 +59,10 @@
 		border-radius: 1rem;
 		background: #121212;
 	}
+
+	@media (max-width: 520px) {
+		iframe {
+			height: 152px;
+		}
+	}
 </style>

@@ -284,4 +284,45 @@
 			top: 21.2rem;
 		}
 	}
+
+	@media (max-width: 480px) {
+		.cake-card {
+			min-height: 18rem;
+		}
+
+		.flame {
+			top: 2.4rem;
+			width: 1.4rem;
+			height: 2rem;
+		}
+
+		.candle {
+			top: 4.2rem;
+			width: 0.8rem;
+			height: 3rem;
+		}
+
+		.cake-top {
+			top: 6.8rem;
+			width: 8rem;
+			height: 3rem;
+		}
+
+		.cake-middle {
+			top: 9.4rem;
+			width: 11rem;
+			height: 3.8rem;
+		}
+
+		.cake-bottom {
+			top: 12.7rem;
+			width: 13.5rem;
+			height: 4rem;
+		}
+
+		.plate {
+			top: 16.3rem;
+			width: 16rem;
+		}
+	}
 </style>

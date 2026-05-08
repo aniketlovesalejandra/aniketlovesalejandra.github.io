@@ -13,49 +13,55 @@
 	export let authSession = null;
 
 	let boardEl;
-	let drawingCanvas;
-	let resizeObserver;
-	let toolsPositionObserver;
 	let saveTimer;
 	let syncTimer;
 
 	let items = [];
-	let strokes = [];
-	let currentStroke = null;
-	let currentTool = 'pencil';
-	let currentResize = null;
 	let currentDrag = null;
+	let currentResize = null;
 	let currentRotate = null;
-	let brushColor = '#9747ff';
 	let selectedItemId = null;
-	let eraserPreview = { x: 0, y: 0, visible: false };
-	let isDrawing = false;
+	let editingTextId = null;
 	let isUploading = false;
 	let isSaving = false;
 	let isLoaded = false;
 	let failedImageIds = [];
 	let imageDisplayUrls = {};
 	let signedUrlAttemptIds = [];
+	let signedUrlRetryCount = {};
 	let latestCanvasUpdatedAt = null;
 	let statusMessage = 'Loading your forever canvas…';
-	let drawingToolsStyle = '';
+	let fileInputEl;
 
-	const brush = {
-		width: 4
-	};
+	// ── Long-press / context menu ────────────────────────────────
+	let contextMenu = { visible: false, x: 0, y: 0, boardX: 0, boardY: 0 };
+	let longPressTimer = null;
+	let longPressStartPos = null;
+	let longPressMoved = false;
+	let pendingPhotoPos = null;
+	const LONG_PRESS_MS = 500;
 
-	const penColors = [
-		{ label: 'Purple', value: '#9747ff' },
-		{ label: 'Pink', value: '#ff5f9f' },
-		{ label: 'Red', value: '#ff477e' },
-		{ label: 'Blue', value: '#38a3ff' },
-		{ label: 'Green', value: '#2ecf8f' },
-		{ label: 'Gold', value: '#ffb703' }
+	// ── Text style options ───────────────────────────────────────
+	const textColors = [
+		{ label: 'Rose',   value: '#c2185b' },
+		{ label: 'Purple', value: '#7b1fa2' },
+		{ label: 'Blue',   value: '#1565c0' },
+		{ label: 'Teal',   value: '#00695c' },
+		{ label: 'Gold',   value: '#e65100' },
+		{ label: 'Ink',    value: '#1a1a2e'  }
 	];
+	let activeTextColor = '#c2185b';
 
-	const eraser = {
-		width: 28
-	};
+	const fontSizes = [14, 18, 24, 32, 48];
+	let activeTextSize = 24;
+
+	const fontFamilies = [
+		{ label: 'Serif',  value: "Georgia, 'Times New Roman', serif" },
+		{ label: 'Sans',   value: "system-ui, 'Segoe UI', sans-serif" },
+		{ label: 'Script', value: "'Segoe Script', 'Bradley Hand', cursive" },
+		{ label: 'Mono',   value: "'Courier New', monospace" }
+	];
+	let activeFont = fontFamilies[0].value;
 
 	$: canSaveForever = hasSupabaseConfig && Boolean(authSession?.user);
 
@@ -66,25 +72,7 @@
 		async function initializeCanvas() {
 			await loadInitialState();
 			if (isDisposed) return;
-
 			await tick();
-			if (isDisposed) return;
-
-			resizeDrawingCanvas();
-			updateDrawingToolsPosition();
-
-			if (typeof ResizeObserver !== 'undefined' && boardEl) {
-				resizeObserver = new ResizeObserver(resizeDrawingCanvas);
-				resizeObserver.observe(boardEl);
-			}
-
-			const dateHeading = document.querySelector('.date-header h1');
-			if (typeof ResizeObserver !== 'undefined' && dateHeading) {
-				toolsPositionObserver = new ResizeObserver(updateDrawingToolsPosition);
-				toolsPositionObserver.observe(dateHeading);
-			}
-
-			window.addEventListener('resize', updateDrawingToolsPosition);
 			unsubscribeCanvas = startCanvasSync();
 		}
 
@@ -93,25 +81,18 @@
 		return () => {
 			isDisposed = true;
 			unsubscribeCanvas();
-			resizeObserver?.disconnect();
-			toolsPositionObserver?.disconnect();
-			window.removeEventListener('resize', updateDrawingToolsPosition);
 			window.clearTimeout(saveTimer);
 			window.clearInterval(syncTimer);
+			if (longPressTimer) window.clearTimeout(longPressTimer);
 		};
 	});
 
 	function createId(prefix) {
-		if (typeof crypto !== 'undefined' && crypto.randomUUID) {
-			return `${prefix}-${crypto.randomUUID()}`;
-		}
-
+		if (typeof crypto !== 'undefined' && crypto.randomUUID) return `${prefix}-${crypto.randomUUID()}`;
 		return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 	}
 
-	function clamp(value, min, max) {
-		return Math.min(max, Math.max(min, value));
-	}
+	function clamp(value, min, max) { return Math.min(max, Math.max(min, value)); }
 
 	function normalizeAngle(value) {
 		return ((((value + 180) % 360) + 360) % 360) - 180;
@@ -120,31 +101,23 @@
 	async function loadInitialState() {
 		try {
 			const state = await loadCanvasState();
-			items = state.items ?? [];
-			strokes = state.strokes ?? [];
+			items = (state.items ?? []).filter((i) => i.type === 'image' || i.type === 'text');
 			latestCanvasUpdatedAt = state.updatedAt;
 			isLoaded = true;
 			statusMessage = state.updatedAt
 				? `Loaded the canvas saved ${formatTimestamp(state.updatedAt)}.`
-				: 'Blank canvas ready. Drop a photo anywhere, or write right on the page.';
+				: 'Long-press anywhere to add a note or photo.';
 		} catch (error) {
 			console.error('Canvas load failed', error);
 			isLoaded = true;
-			statusMessage = 'Could not load the permanent canvas. A local draft canvas is ready.';
+			statusMessage = 'Could not load the permanent canvas. A local draft is ready.';
 		}
 	}
 
 	function formatTimestamp(value) {
 		try {
-			return new Intl.DateTimeFormat('en-US', {
-				month: 'short',
-				day: 'numeric',
-				hour: 'numeric',
-				minute: '2-digit'
-			}).format(new Date(value));
-		} catch {
-			return 'recently';
-		}
+			return new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }).format(new Date(value));
+		} catch { return 'recently'; }
 	}
 
 	function timestampValue(value) {
@@ -157,33 +130,29 @@
 	}
 
 	function isCanvasBusy() {
-		return Boolean(isDrawing || isUploading || isSaving || currentStroke || currentResize || currentDrag || currentRotate || saveTimer);
+		return Boolean(isUploading || isSaving || currentResize || currentDrag || currentRotate || saveTimer || editingTextId);
 	}
 
 	async function applyRemoteCanvasState(state) {
 		if (!remoteStateIsNewer(state) || isCanvasBusy()) return;
 
-		items = state.items ?? [];
-		strokes = state.strokes ?? [];
+		items = (state.items ?? []).filter((i) => i.type === 'image' || i.type === 'text');
 		latestCanvasUpdatedAt = state.updatedAt;
 
 		const itemIds = new Set(items.map((item) => item.id));
 		failedImageIds = failedImageIds.filter((id) => itemIds.has(id));
 		signedUrlAttemptIds = signedUrlAttemptIds.filter((id) => itemIds.has(id));
+		signedUrlRetryCount = Object.fromEntries(Object.entries(signedUrlRetryCount).filter(([id]) => itemIds.has(id)));
 		imageDisplayUrls = Object.fromEntries(Object.entries(imageDisplayUrls).filter(([id]) => itemIds.has(id)));
 
-		if (selectedItemId && !itemIds.has(selectedItemId)) {
-			selectedItemId = null;
-		}
+		if (selectedItemId && !itemIds.has(selectedItemId)) selectedItemId = null;
 
 		await tick();
-		redrawAll(null);
 		statusMessage = `Live canvas updated ${formatTimestamp(state.updatedAt)}.`;
 	}
 
 	async function refreshCanvasStateFromRemote() {
 		if (!hasSupabaseConfig || isCanvasBusy()) return;
-
 		try {
 			await applyRemoteCanvasState(await loadCanvasState());
 		} catch (error) {
@@ -193,224 +162,181 @@
 
 	function startCanvasSync() {
 		if (!hasSupabaseConfig) return () => {};
-
-		const unsubscribeRealtime = subscribeToCanvasState((state) => {
-			void applyRemoteCanvasState(state);
-		});
-
-		syncTimer = window.setInterval(refreshCanvasStateFromRemote, 4000);
-
-		return () => {
-			unsubscribeRealtime();
-			window.clearInterval(syncTimer);
-		};
+		const unsubscribeRealtime = subscribeToCanvasState((state) => { void applyRemoteCanvasState(state); });
+		syncTimer = window.setInterval(refreshCanvasStateFromRemote, 30000);
+		return () => { unsubscribeRealtime(); window.clearInterval(syncTimer); };
 	}
 
-	function resizeDrawingCanvas() {
-		if (!boardEl || !drawingCanvas) return;
-
-		const rect = boardEl.getBoundingClientRect();
-		const dpr = window.devicePixelRatio || 1;
-		drawingCanvas.width = Math.max(1, Math.round(rect.width * dpr));
-		drawingCanvas.height = Math.max(1, Math.round(rect.height * dpr));
-		drawingCanvas.style.width = `${rect.width}px`;
-		drawingCanvas.style.height = `${rect.height}px`;
-
-		const context = drawingCanvas.getContext('2d');
-		context.setTransform(dpr, 0, 0, dpr, 0, 0);
-		redrawAll();
-	}
-
-	function updateDrawingToolsPosition() {
-		if (typeof document === 'undefined') return;
-
-		const dateHeading = document.querySelector('.date-header h1');
-		if (!dateHeading) return;
-
-		const offset = window.innerWidth <= 720 ? 10 : 12;
-		const top = Math.round(dateHeading.getBoundingClientRect().bottom + offset);
-		drawingToolsStyle = `top: ${top}px`;
-	}
-
-	function redrawAll(extraStroke = currentStroke) {
-		if (!boardEl || !drawingCanvas) return;
-
-		const rect = boardEl.getBoundingClientRect();
-		const context = drawingCanvas.getContext('2d');
-		context.clearRect(0, 0, rect.width, rect.height);
-
-		for (const stroke of strokes) {
-			drawStroke(context, stroke, rect);
-		}
-
-		if (extraStroke) {
-			drawStroke(context, extraStroke, rect);
-		}
-	}
-
-	function drawStroke(context, stroke, rect) {
-		const points = stroke.points ?? [];
-		if (!points.length) return;
-
-		const isEraser = stroke.tool === 'eraser';
-		const strokeWidth = stroke.width ?? (isEraser ? eraser.width : brush.width);
-		const strokeColor = isEraser ? 'rgba(0, 0, 0, 1)' : (stroke.color ?? brushColor);
-
-		context.save();
-		context.globalCompositeOperation = isEraser ? 'destination-out' : 'source-over';
-		context.lineCap = 'round';
-		context.lineJoin = 'round';
-		context.strokeStyle = strokeColor;
-		context.fillStyle = strokeColor;
-		context.lineWidth = strokeWidth;
-
-		const first = points[0];
-
-		context.beginPath();
-		context.moveTo(first.x * rect.width, first.y * rect.height);
-
-		if (points.length === 1) {
-			context.arc(first.x * rect.width, first.y * rect.height, strokeWidth / 2, 0, Math.PI * 2);
-			context.fill();
-			context.restore();
-			return;
-		}
-
-		for (const point of points.slice(1)) {
-			context.lineTo(point.x * rect.width, point.y * rect.height);
-		}
-
-		context.stroke();
-		context.restore();
-	}
-
-	function getPointerPoint(event) {
-		const rect = boardEl.getBoundingClientRect();
-		return {
-			x: clamp((event.clientX - rect.left) / rect.width, 0, 1),
-			y: clamp((event.clientY - rect.top) / rect.height, 0, 1)
-		};
-	}
-
-	function setTool(tool) {
-		currentTool = tool;
-		eraserPreview = { ...eraserPreview, visible: false };
-	}
-
-	function selectPenColor(color) {
-		brushColor = color;
-		currentTool = 'pencil';
-		eraserPreview = { ...eraserPreview, visible: false };
-		statusMessage = 'Pen color changed.';
-	}
-
-	function updateEraserPreview(event) {
-		if (currentTool !== 'eraser' || !boardEl) {
-			eraserPreview = { ...eraserPreview, visible: false };
-			return;
-		}
-
-		const rect = boardEl.getBoundingClientRect();
-		eraserPreview = {
-			x: event.clientX - rect.left,
-			y: event.clientY - rect.top,
-			visible: true
-		};
-	}
-
-	function hideEraserPreview() {
-		if (!isDrawing) {
-			eraserPreview = { ...eraserPreview, visible: false };
-		}
-	}
-
-	function startDrawing(event) {
-		if (!isLoaded) return;
-
-		event.preventDefault();
-		updateEraserPreview(event);
-		selectedItemId = null;
-		drawingCanvas.setPointerCapture?.(event.pointerId);
-		const tool = currentTool === 'eraser' ? 'eraser' : 'pencil';
-		const isEraser = tool === 'eraser';
-		isDrawing = true;
-		currentStroke = {
-			id: createId('stroke'),
-			tool,
-			color: brushColor,
-			width: isEraser ? eraser.width : brush.width,
-			points: [getPointerPoint(event)]
-		};
-		redrawAll(currentStroke);
-	}
-
-	function handleDrawingPointerMove(event) {
-		updateEraserPreview(event);
-		continueDrawing(event);
-	}
-
-	function handleDrawingPointerUp(event) {
-		endDrawing(event);
-		updateEraserPreview(event);
-	}
-
-	function handleDrawingPointerCancel(event) {
-		endDrawing(event);
-		eraserPreview = { ...eraserPreview, visible: false };
-	}
-
-	function continueDrawing(event) {
-		if (!isDrawing || !currentStroke) return;
-
-		event.preventDefault();
-		currentStroke = {
-			...currentStroke,
-			points: [...currentStroke.points, getPointerPoint(event)]
-		};
-		redrawAll(currentStroke);
-	}
-
-	function endDrawing(event) {
-		if (!isDrawing || !currentStroke) return;
-
-		event.preventDefault();
-		drawingCanvas.releasePointerCapture?.(event.pointerId);
-		strokes = [...strokes, currentStroke];
-		currentStroke = null;
-		isDrawing = false;
-		redrawAll(null);
-		scheduleSave();
-	}
+	// ── Item helpers ─────────────────────────────────────────────
 
 	function itemStyle(item, zOffset = 0) {
-		return [
+		const parts = [
 			`left: ${item.x}%`,
 			`top: ${item.y}%`,
-			`width: ${item.width}%`,
 			`transform: rotate(${item.rotation ?? 0}deg)`,
 			`z-index: ${(item.z ?? 1) + zOffset}`
-		].join('; ');
+		];
+		if (item.type === 'image') parts.push(`width: ${item.width}%`);
+		return parts.join('; ');
 	}
 
 	function nextZIndex() {
-		return Math.max(1, ...items.map((item) => item.z ?? 1)) + 1;
+		return Math.max(1, ...items.map((i) => i.z ?? 1)) + 1;
 	}
 
-	function selectImage(event, item) {
+	function textVars(item) {
+		return [
+			`--text-color: ${item.color ?? activeTextColor}`,
+			`--text-size: ${item.fontSize ?? activeTextSize}px`,
+			`--text-font: ${item.fontFamily ?? activeFont}`
+		].join('; ');
+	}
+
+	// ── Long-press → context menu ─────────────────────────────────
+
+	function boardPointerDown(event) {
+		if (event.target !== boardEl) return;
+		if (!isLoaded) return;
+		if (contextMenu.visible) { closeContextMenu(); return; }
+
+		selectedItemId = null;
+		longPressStartPos = { x: event.clientX, y: event.clientY };
+		longPressMoved = false;
+
+		longPressTimer = window.setTimeout(() => {
+			longPressTimer = null;
+			if (longPressMoved) return;
+			const rect = boardEl.getBoundingClientRect();
+			const boardX = clamp(((longPressStartPos.x - rect.left) / rect.width) * 100, 2, 74);
+			const boardY = clamp(((longPressStartPos.y - rect.top) / rect.height) * 100, 2, 84);
+			contextMenu = { visible: true, x: longPressStartPos.x, y: longPressStartPos.y, boardX, boardY };
+		}, LONG_PRESS_MS);
+	}
+
+	function boardPointerMove(event) {
+		if (!longPressTimer || !longPressStartPos) return;
+		const dx = event.clientX - longPressStartPos.x;
+		const dy = event.clientY - longPressStartPos.y;
+		if (Math.abs(dx) > 8 || Math.abs(dy) > 8) {
+			longPressMoved = true;
+			window.clearTimeout(longPressTimer);
+			longPressTimer = null;
+		}
+	}
+
+	function boardPointerUp() {
+		if (longPressTimer) { window.clearTimeout(longPressTimer); longPressTimer = null; }
+	}
+
+	function boardPointerCancel() {
+		if (longPressTimer) { window.clearTimeout(longPressTimer); longPressTimer = null; }
+	}
+
+	function closeContextMenu() {
+		contextMenu = { ...contextMenu, visible: false };
+	}
+
+	function addTextAtMenu() {
+		const id = createId('text');
+		items = [...items, {
+			id, type: 'text', text: '',
+			x: contextMenu.boardX, y: contextMenu.boardY,
+			color: activeTextColor, fontSize: activeTextSize,
+			fontFamily: activeFont, rotation: 0, z: nextZIndex()
+		}];
+		selectedItemId = id;
+		editingTextId = id;
+		closeContextMenu();
+	}
+
+	function addPhotoAtMenu() {
+		pendingPhotoPos = { x: contextMenu.boardX, y: contextMenu.boardY };
+		closeContextMenu();
+		openFilePicker();
+	}
+
+	// ── Text editing ─────────────────────────────────────────────
+
+	function startEditingText(event, item) {
+		event.stopPropagation();
+		selectedItemId = item.id;
+		editingTextId = item.id;
+	}
+
+	function handleTextInput(event, item) {
+		items = items.map((i) => (i.id === item.id ? { ...i, text: event.target.value } : i));
+	}
+
+	function commitText(item) {
+		editingTextId = null;
+		if (!item.text?.trim()) {
+			items = items.filter((i) => i.id !== item.id);
+			if (selectedItemId === item.id) selectedItemId = null;
+		} else {
+			scheduleSave();
+		}
+	}
+
+	function handleTextKeydown(event) {
+		if (event.key === 'Escape') event.currentTarget.blur();
+		if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); event.currentTarget.blur(); }
+	}
+
+	// ── Select / remove ──────────────────────────────────────────
+
+	function selectItem(event, item) {
 		event.preventDefault();
 		event.stopPropagation();
 		selectedItemId = item.id;
-		statusMessage = 'Image selected. Drag it, rotate it, resize it, or remove it.';
+		if (item.type === 'text') {
+			if (item.color) activeTextColor = item.color;
+			if (item.fontSize) activeTextSize = item.fontSize;
+			if (item.fontFamily) activeFont = item.fontFamily;
+		}
 	}
 
-	function startImageDrag(event, item) {
+	function removeItem(itemId) {
+		items = items.filter((i) => i.id !== itemId);
+		if (selectedItemId === itemId) selectedItemId = null;
+		if (editingTextId === itemId) editingTextId = null;
+		statusMessage = 'Item removed.';
+		scheduleSave();
+	}
+
+	// ── Toolbar style apply helpers ───────────────────────────────
+
+	function applyTextColor(value) {
+		activeTextColor = value;
+		const sel = items.find((i) => i.id === selectedItemId && i.type === 'text');
+		if (sel) { items = items.map((i) => i.id === sel.id ? { ...i, color: value } : i); scheduleSave(); }
+	}
+
+	function applyTextSize(value) {
+		activeTextSize = value;
+		const sel = items.find((i) => i.id === selectedItemId && i.type === 'text');
+		if (sel) { items = items.map((i) => i.id === sel.id ? { ...i, fontSize: value } : i); scheduleSave(); }
+	}
+
+	function applyTextFont(value) {
+		activeFont = value;
+		const sel = items.find((i) => i.id === selectedItemId && i.type === 'text');
+		if (sel) { items = items.map((i) => i.id === sel.id ? { ...i, fontFamily: value } : i); scheduleSave(); }
+	}
+
+	// ── Drag ─────────────────────────────────────────────────────
+
+	function startDrag(event, item) {
 		event.preventDefault();
 		event.stopPropagation();
 		event.currentTarget.setPointerCapture?.(event.pointerId);
 		selectedItemId = item.id;
+		if (item.type === 'text') {
+			if (item.color) activeTextColor = item.color;
+			if (item.fontSize) activeTextSize = item.fontSize;
+			if (item.fontFamily) activeFont = item.fontFamily;
+		}
 
 		const rect = boardEl.getBoundingClientRect();
-		const z = nextZIndex();
 		currentDrag = {
 			id: item.id,
 			pointerId: event.pointerId,
@@ -418,115 +344,62 @@
 			startClientY: event.clientY,
 			startX: item.x,
 			startY: item.y,
-			width: item.width,
+			width: item.width ?? 0,
 			boardWidth: rect.width,
 			boardHeight: rect.height,
 			moved: false
 		};
-
-		items = items.map((canvasItem) => (canvasItem.id === item.id ? { ...canvasItem, z } : canvasItem));
+		items = items.map((i) => (i.id === item.id ? { ...i, z: nextZIndex() } : i));
 	}
 
-	function dragImage(event) {
+	function onDragMove(event) {
 		if (!currentDrag || event.pointerId !== currentDrag.pointerId) return;
-
 		event.preventDefault();
 		event.stopPropagation();
+
 		const deltaX = ((event.clientX - currentDrag.startClientX) / currentDrag.boardWidth) * 100;
 		const deltaY = ((event.clientY - currentDrag.startClientY) / currentDrag.boardHeight) * 100;
 		const moved = currentDrag.moved || Math.abs(deltaX) > 0.25 || Math.abs(deltaY) > 0.25;
-		const maxX = Math.max(0, 100 - currentDrag.width);
+		const maxX = currentDrag.width > 0 ? Math.max(0, 100 - currentDrag.width) : 96;
 		currentDrag = { ...currentDrag, moved };
 
-		items = items.map((item) =>
-			item.id === currentDrag.id
-				? {
-						...item,
-						x: clamp(currentDrag.startX + deltaX, 0, maxX),
-						y: clamp(currentDrag.startY + deltaY, 0, 90)
-					}
-				: item
+		items = items.map((i) =>
+			i.id === currentDrag.id
+				? { ...i, x: clamp(currentDrag.startX + deltaX, 0, maxX), y: clamp(currentDrag.startY + deltaY, 0, 92) }
+				: i
 		);
 	}
 
-	function endImageDrag(event) {
+	function endDrag(event) {
 		if (!currentDrag || event.pointerId !== currentDrag.pointerId) return;
-
 		event.preventDefault();
 		event.stopPropagation();
 		event.currentTarget.releasePointerCapture?.(event.pointerId);
-		const moved = currentDrag.moved;
+		if (currentDrag.moved) { statusMessage = 'Item moved.'; scheduleSave(); }
 		currentDrag = null;
-
-		if (moved) {
-			statusMessage = 'Image moved.';
-			scheduleSave();
-		}
 	}
 
-	function handleImageKeydown(event, item) {
-		const step = event.shiftKey ? 5 : 2;
-		let nextX = item.x;
-		let nextY = item.y;
+	// ── Resize (images only) ─────────────────────────────────────
 
-		if (event.key === 'ArrowRight') {
-			nextX = clamp(item.x + step, 0, Math.max(0, 100 - item.width));
-		} else if (event.key === 'ArrowLeft') {
-			nextX = clamp(item.x - step, 0, Math.max(0, 100 - item.width));
-		} else if (event.key === 'ArrowDown') {
-			nextY = clamp(item.y + step, 0, 90);
-		} else if (event.key === 'ArrowUp') {
-			nextY = clamp(item.y - step, 0, 90);
-		} else {
-			return;
-		}
-
-		event.preventDefault();
-		event.stopPropagation();
-		selectedItemId = item.id;
-		items = items.map((canvasItem) => (canvasItem.id === item.id ? { ...canvasItem, x: nextX, y: nextY } : canvasItem));
-		statusMessage = 'Image moved.';
-		scheduleSave();
-	}
-
-	function removeImage(itemId) {
-		items = items.filter((item) => item.id !== itemId);
-		if (selectedItemId === itemId) {
-			selectedItemId = null;
-		}
-		statusMessage = 'Image removed.';
-		scheduleSave();
-	}
-
-	function startImageResize(event, item) {
+	function startResize(event, item) {
 		event.preventDefault();
 		event.stopPropagation();
 		event.currentTarget.setPointerCapture?.(event.pointerId);
-		selectedItemId = item.id;
-
 		const rect = boardEl.getBoundingClientRect();
-		currentResize = {
-			id: item.id,
-			pointerId: event.pointerId,
-			startX: event.clientX,
-			startWidth: item.width,
-			boardWidth: rect.width
-		};
+		currentResize = { id: item.id, pointerId: event.pointerId, startX: event.clientX, startWidth: item.width, boardWidth: rect.width };
 	}
 
-	function resizeImage(event) {
+	function onResizeMove(event) {
 		if (!currentResize || event.pointerId !== currentResize.pointerId) return;
-
 		event.preventDefault();
 		event.stopPropagation();
-		const deltaPercent = ((event.clientX - currentResize.startX) / currentResize.boardWidth) * 100;
-		const width = clamp(currentResize.startWidth + deltaPercent, 8, 72);
-		items = items.map((item) => (item.id === currentResize.id ? { ...item, width } : item));
+		const delta = ((event.clientX - currentResize.startX) / currentResize.boardWidth) * 100;
+		const width = clamp(currentResize.startWidth + delta, 8, 72);
+		items = items.map((i) => (i.id === currentResize.id ? { ...i, width } : i));
 	}
 
-	function endImageResize(event) {
+	function endResize(event) {
 		if (!currentResize || event.pointerId !== currentResize.pointerId) return;
-
 		event.preventDefault();
 		event.stopPropagation();
 		event.currentTarget.releasePointerCapture?.(event.pointerId);
@@ -535,185 +408,91 @@
 		scheduleSave();
 	}
 
-	function handleResizeKeydown(event, item) {
-		const step = event.shiftKey ? 5 : 2;
-		let width = item.width;
-
-		if (event.key === 'ArrowRight' || event.key === 'ArrowUp') {
-			width = clamp(item.width + step, 8, 72);
-		} else if (event.key === 'ArrowLeft' || event.key === 'ArrowDown') {
-			width = clamp(item.width - step, 8, 72);
-		} else {
-			return;
-		}
-
-		event.preventDefault();
-		items = items.map((canvasItem) => (canvasItem.id === item.id ? { ...canvasItem, width } : canvasItem));
-		statusMessage = 'Image resized.';
-		scheduleSave();
-	}
+	// ── Rotate ───────────────────────────────────────────────────
 
 	function pointerAngle(event, center) {
 		return (Math.atan2(event.clientY - center.y, event.clientX - center.x) * 180) / Math.PI;
 	}
 
-	function startImageRotate(event, item) {
+	function startRotate(event, item) {
 		event.preventDefault();
 		event.stopPropagation();
 		event.currentTarget.setPointerCapture?.(event.pointerId);
 		selectedItemId = item.id;
-
-		const imageRect = event.currentTarget.parentElement?.querySelector('.control-measure')?.getBoundingClientRect();
-		if (!imageRect) return;
-
-		const center = {
-			x: imageRect.left + imageRect.width / 2,
-			y: imageRect.top + imageRect.height / 2
-		};
-
-		currentRotate = {
-			id: item.id,
-			pointerId: event.pointerId,
-			center,
-			startAngle: pointerAngle(event, center),
-			startRotation: item.rotation ?? 0
-		};
+		const measure = event.currentTarget.parentElement?.querySelector('.control-measure');
+		const r = measure?.getBoundingClientRect();
+		if (!r) return;
+		const center = { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+		currentRotate = { id: item.id, pointerId: event.pointerId, center, startAngle: pointerAngle(event, center), startRotation: item.rotation ?? 0 };
 	}
 
-	function rotateImage(event) {
+	function onRotateMove(event) {
 		if (!currentRotate || event.pointerId !== currentRotate.pointerId) return;
-
 		event.preventDefault();
 		event.stopPropagation();
-		const nextAngle = pointerAngle(event, currentRotate.center);
-		const delta = normalizeAngle(nextAngle - currentRotate.startAngle);
+		const delta = normalizeAngle(pointerAngle(event, currentRotate.center) - currentRotate.startAngle);
 		const rotation = Math.round(normalizeAngle(currentRotate.startRotation + delta) * 10) / 10;
-		items = items.map((item) => (item.id === currentRotate.id ? { ...item, rotation } : item));
+		items = items.map((i) => (i.id === currentRotate.id ? { ...i, rotation } : i));
 	}
 
-	function endImageRotate(event) {
+	function endRotate(event) {
 		if (!currentRotate || event.pointerId !== currentRotate.pointerId) return;
-
 		event.preventDefault();
 		event.stopPropagation();
 		event.currentTarget.releasePointerCapture?.(event.pointerId);
 		currentRotate = null;
-		statusMessage = 'Image rotated.';
+		statusMessage = 'Item rotated.';
 		scheduleSave();
 	}
 
-	function handleRotateKeydown(event, item) {
-		const step = event.shiftKey ? 15 : 5;
-		let rotation = item.rotation ?? 0;
+	// ── Image upload ─────────────────────────────────────────────
 
-		if (event.key === 'ArrowRight' || event.key === 'ArrowUp') {
-			rotation = normalizeAngle(rotation + step);
-		} else if (event.key === 'ArrowLeft' || event.key === 'ArrowDown') {
-			rotation = normalizeAngle(rotation - step);
-		} else {
-			return;
-		}
+	function handleDragOver(event) { event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; }
 
-		event.preventDefault();
-		event.stopPropagation();
-		selectedItemId = item.id;
-		items = items.map((canvasItem) => (canvasItem.id === item.id ? { ...canvasItem, rotation } : canvasItem));
-		statusMessage = 'Image rotated.';
-		scheduleSave();
-	}
-
-	function handleDragOver(event) {
-		event.preventDefault();
-		event.dataTransfer.dropEffect = 'copy';
-	}
-
-	function imageLoadFailed(item) {
-		return failedImageIds.includes(item.id);
-	}
-
-	function imageDisplaySrc(item) {
-		return imageDisplayUrls[item.id] ?? item.src;
-	}
-
-	function handleImageLoad(item) {
-		if (imageLoadFailed(item)) {
-			failedImageIds = failedImageIds.filter((id) => id !== item.id);
-		}
-	}
-
-	async function handleImageError(item) {
-		if (!signedUrlAttemptIds.includes(item.id)) {
-			signedUrlAttemptIds = [...signedUrlAttemptIds, item.id];
-
-			try {
-				const displayUrl = await getCanvasImageDisplayUrl(item.src);
-
-				if (displayUrl && displayUrl !== item.src) {
-					imageDisplayUrls = { ...imageDisplayUrls, [item.id]: displayUrl };
-					statusMessage = 'Image uploaded. Using a private signed URL to display it.';
-					return;
-				}
-			} catch (error) {
-				console.error('Unable to create a signed image URL', error);
-			}
-		}
-
-		if (!imageLoadFailed(item)) {
-			failedImageIds = [...failedImageIds, item.id];
-		}
-
-		if (typeof item.src === 'string' && item.src.includes('/storage/v1/object/public/')) {
-			statusMessage = 'Image uploaded, but its public URL is blocked. Make the canvas-uploads bucket public.';
-		} else {
-			statusMessage = 'Image saved, but this browser could not display it.';
-		}
-	}
-
-	async function handleDrop(event) {
+	function handleDrop(event) {
 		event.preventDefault();
 		const rect = boardEl.getBoundingClientRect();
 		const x = clamp(((event.clientX - rect.left) / rect.width) * 100, 4, 82);
 		const y = clamp(((event.clientY - rect.top) / rect.height) * 100, 4, 78);
-		await addFiles(Array.from(event.dataTransfer.files), { x, y });
+		void addFiles(Array.from(event.dataTransfer.files), { x, y });
+	}
+
+	function openFilePicker() { fileInputEl?.click(); }
+
+	async function handleFileInputChange(event) {
+		const files = Array.from(event.target.files ?? []);
+		event.target.value = '';
+		if (!files.length) return;
+		const placement = pendingPhotoPos ?? { x: 15, y: 20 };
+		pendingPhotoPos = null;
+		await addFiles(files, placement);
 	}
 
 	async function addFiles(files, placement) {
-		const imageFiles = files.filter((file) => file.type.startsWith('image/'));
-		if (!imageFiles.length) {
-			statusMessage = 'Drop an image file onto the canvas.';
-			return;
-		}
+		const imageFiles = files.filter((f) => f.type.startsWith('image/'));
+		if (!imageFiles.length) { statusMessage = 'Drop an image file onto the canvas.'; return; }
 
 		isUploading = true;
 		statusMessage = canSaveForever ? 'Uploading image forever…' : 'Adding image as a local draft…';
 
 		try {
-			const addedItems = [];
+			const added = [];
 			for (const [index, file] of imageFiles.entries()) {
 				let src;
-
 				try {
 					src = await uploadCanvasImage(file, { remote: canSaveForever });
-				} catch (error) {
-					console.error('Image upload failed, using local draft', error);
+				} catch (err) {
+					console.error('Image upload failed, using local draft', err);
 					src = await fileToDataUrl(file);
-					statusMessage = 'Upload failed, so the image was added as a local draft.';
+					statusMessage = 'Upload failed, image added as local draft.';
 				}
-
-				addedItems.push({
-					id: createId('image'),
-					type: 'image',
-					src,
-					alt: file.name || 'Dropped canvas image',
-					x: clamp(placement.x + index * 3, 4, 82),
-					y: clamp(placement.y + index * 3, 4, 78),
-					width: 24,
-					rotation: index % 2 === 0 ? -2 : 2,
-					z: nextZIndex() + index
+				added.push({
+					id: createId('image'), type: 'image', src, alt: file.name || 'Canvas image',
+					x: clamp(placement.x + index * 3, 4, 82), y: clamp(placement.y + index * 3, 4, 78),
+					width: 24, rotation: index % 2 === 0 ? -2 : 2, z: nextZIndex() + index
 				});
 			}
-
-			items = [...items, ...addedItems];
+			items = [...items, ...added];
 			selectedItemId = null;
 			scheduleSave();
 		} finally {
@@ -721,12 +500,48 @@
 		}
 	}
 
+	// ── Image error / signed URL ─────────────────────────────────
+
+	function imageLoadFailed(item) { return failedImageIds.includes(item.id); }
+	function imageDisplaySrc(item) { return imageDisplayUrls[item.id] ?? item.src; }
+
+	function handleImageLoad(item) {
+		if (imageLoadFailed(item)) failedImageIds = failedImageIds.filter((id) => id !== item.id);
+		if (item.id in signedUrlRetryCount) {
+			const { [item.id]: _r, ...rest } = signedUrlRetryCount;
+			signedUrlRetryCount = rest;
+		}
+	}
+
+	async function handleImageError(item) {
+		if (signedUrlAttemptIds.includes(item.id)) return;
+		const retries = signedUrlRetryCount[item.id] ?? 0;
+		if (retries < 2) {
+			signedUrlAttemptIds = [...signedUrlAttemptIds, item.id];
+			signedUrlRetryCount = { ...signedUrlRetryCount, [item.id]: retries + 1 };
+			try {
+				const displayUrl = await getCanvasImageDisplayUrl(item.src);
+				if (displayUrl && displayUrl !== item.src) {
+					imageDisplayUrls = { ...imageDisplayUrls, [item.id]: displayUrl };
+					signedUrlAttemptIds = signedUrlAttemptIds.filter((id) => id !== item.id);
+					statusMessage = 'Using a private signed URL to display image.';
+					return;
+				}
+			} catch (err) { console.error('Unable to create signed URL', err); }
+			signedUrlAttemptIds = signedUrlAttemptIds.filter((id) => id !== item.id);
+		}
+		if (!imageLoadFailed(item)) failedImageIds = [...failedImageIds, item.id];
+		statusMessage = item.src?.includes('/storage/v1/object/public/')
+			? 'Image URL blocked. Make the canvas-uploads bucket public.'
+			: 'Image saved, but this browser could not display it.';
+	}
+
+	// ── Save ─────────────────────────────────────────────────────
+
 	function scheduleSave() {
 		if (!isLoaded) return;
-
 		window.clearTimeout(saveTimer);
-		statusMessage = canSaveForever ? 'Saving this to the forever canvas…' : 'Saving a local draft…';
-
+		statusMessage = canSaveForever ? 'Saving…' : 'Saving a local draft…';
 		saveTimer = window.setTimeout(persistCanvasState, 650);
 	}
 
@@ -734,34 +549,15 @@
 		window.clearTimeout(saveTimer);
 		saveTimer = null;
 		isSaving = true;
-
 		try {
-			const result = await saveCanvasState(
-				{
-					version: 1,
-					items,
-					strokes
-				},
-				{ remote: canSaveForever }
-			);
-
+			const result = await saveCanvasState({ version: 1, items, strokes: [] }, { remote: canSaveForever });
 			latestCanvasUpdatedAt = result.state.updatedAt;
-			statusMessage =
-				result.target === 'supabase'
-					? 'Saved forever 💌'
-					: hasSupabaseConfig
-						? 'Local draft saved. Sign in to make it permanent.'
-						: 'Saved on this browser. Add Supabase keys to make it permanent everywhere.';
-		} catch (error) {
-			console.error('Canvas save failed', error);
-			await saveCanvasState(
-				{
-					version: 1,
-					items,
-					strokes
-				},
-				{ remote: false }
-			);
+			statusMessage = result.target === 'supabase'
+				? 'Saved forever 💌'
+				: hasSupabaseConfig ? 'Local draft saved. Sign in to make it permanent.' : 'Saved on this browser.';
+		} catch (err) {
+			console.error('Canvas save failed', err);
+			await saveCanvasState({ version: 1, items, strokes: [] }, { remote: false });
 			statusMessage = 'Permanent save failed. A safe local draft was saved instead.';
 		} finally {
 			isSaving = false;
@@ -769,133 +565,175 @@
 	}
 </script>
 
-<section class="canvas-shell" aria-label="Forever drawing canvas">
+<section class="canvas-shell" aria-label="Forever canvas">
 	<div class="board-frame">
 		<div
 			bind:this={boardEl}
 			class="canvas-board"
 			role="region"
-			aria-label="Full-page drawing and drop canvas"
+			aria-label="Canvas — long-press to add a note or photo"
+			on:pointerdown={boardPointerDown}
+			on:pointermove={boardPointerMove}
+			on:pointerup={boardPointerUp}
+			on:pointercancel={boardPointerCancel}
+			on:contextmenu|preventDefault
 			on:dragover={handleDragOver}
 			on:drop={handleDrop}
 		>
-			<canvas
-				bind:this={drawingCanvas}
-				class="drawing-layer"
-				class:eraser-enabled={currentTool === 'eraser'}
-				on:pointerdown={startDrawing}
-				on:pointermove={handleDrawingPointerMove}
-				on:pointerup={handleDrawingPointerUp}
-				on:pointercancel={handleDrawingPointerCancel}
-				on:pointerleave={hideEraserPreview}
-				on:mousemove={updateEraserPreview}
-				on:mouseleave={hideEraserPreview}
-				aria-label="Always-on drawing layer"
-			/>
+			<!-- Images -->
+			{#each items.filter((i) => i.type === 'image') as item (item.id)}
+				<div class="canvas-item image-item" class:load-failed={imageLoadFailed(item)} style={itemStyle(item)}>
+					<img src={imageDisplaySrc(item)} alt={item.alt ?? ''} draggable="false"
+						on:load={() => handleImageLoad(item)}
+						on:error={() => handleImageError(item)} />
+					{#if imageLoadFailed(item)}<span class="image-fallback">Image saved, URL blocked</span>{/if}
+				</div>
+			{/each}
 
-			{#if currentTool === 'eraser' && eraserPreview.visible}
-				<div
-					class="eraser-outline"
-					style={`left: ${eraserPreview.x}px; top: ${eraserPreview.y}px; width: ${eraser.width}px; height: ${eraser.width}px`}
-					aria-hidden="true"
-				></div>
-			{/if}
-
-			{#each items as item (item.id)}
-				<div class="canvas-item" class:image-load-failed={imageLoadFailed(item)} style={itemStyle(item)}>
-					<img src={imageDisplaySrc(item)} alt={item.alt ?? ''} draggable="false" on:load={() => handleImageLoad(item)} on:error={() => handleImageError(item)} />
-					{#if imageLoadFailed(item)}
-						<span class="image-fallback">Image saved, URL blocked</span>
+			<!-- Text items -->
+			{#each items.filter((i) => i.type === 'text') as item (item.id)}
+				<div class="canvas-item text-item" class:selected={selectedItemId === item.id}
+					style="{itemStyle(item)}; {textVars(item)}">
+					{#if editingTextId === item.id}
+						<textarea class="text-editor" value={item.text} placeholder="Type here…" rows="1" autofocus
+							on:input={(e) => handleTextInput(e, item)}
+							on:blur={() => commitText(item)}
+							on:keydown={handleTextKeydown}
+							on:pointerdown|stopPropagation></textarea>
+					{:else}
+						<div class="text-display" role="button" tabindex="0" aria-label="Edit text"
+							on:pointerdown={(e) => startDrag(e, item)}
+							on:pointermove={onDragMove}
+							on:pointerup={endDrag}
+							on:pointercancel={endDrag}
+							on:click={(e) => selectItem(e, item)}
+							on:dblclick={(e) => startEditingText(e, item)}
+							on:keydown={(e) => { if (e.key === 'Enter') startEditingText(e, item); }}
+						>{item.text || ''}</div>
 					{/if}
 				</div>
 			{/each}
 
-			<div class="image-controls-layer" aria-label="Image controls">
+			<!-- Controls overlay -->
+			<div class="controls-layer" aria-label="Item controls">
 				{#each items as item (item.id)}
-					<div class="image-controls" class:selected={selectedItemId === item.id} class:image-load-failed={imageLoadFailed(item)} style={itemStyle(item, 20)}>
-						<img class="control-measure" src={imageDisplaySrc(item)} alt="" draggable="false" />
-						<button
-							type="button"
-							class="select-image"
-							on:pointerdown={(event) => startImageDrag(event, item)}
-							on:pointermove={dragImage}
-							on:pointerup={endImageDrag}
-							on:pointercancel={endImageDrag}
-							on:click={(event) => selectImage(event, item)}
-							on:keydown={(event) => handleImageKeydown(event, item)}
-							aria-label={`Select or drag ${item.alt ?? 'image'}`}
-						>
-							<span class="sr-only">Select {item.alt ?? 'image'}</span>
+					<div class="item-controls" class:selected={selectedItemId === item.id} style={itemStyle(item, 20)}>
+						{#if item.type === 'image'}
+							<img class="control-measure" src={imageDisplaySrc(item)} alt="" draggable="false" />
+						{:else}
+							<div class="control-measure text-measure" style="font-size: {item.fontSize ?? 24}px; font-family: {item.fontFamily ?? "Georgia, serif"}">{item.text || '\u00a0'}</div>
+						{/if}
+
+						<button type="button" class="drag-handle"
+							on:pointerdown={(e) => startDrag(e, item)}
+							on:pointermove={onDragMove}
+							on:pointerup={endDrag}
+							on:pointercancel={endDrag}
+							on:click={(e) => selectItem(e, item)}
+							on:dblclick={(e) => { if (item.type === 'text') startEditingText(e, item); }}
+							aria-label="Drag {item.type}">
+							<span class="sr-only">Drag</span>
 						</button>
+
 						{#if selectedItemId === item.id}
-							<button type="button" class="remove-image" on:click={() => removeImage(item.id)} aria-label={`Remove ${item.alt ?? 'image'}`}>
-								×
-							</button>
-							<button
-								type="button"
-								class="rotate-image"
-								on:pointerdown={(event) => startImageRotate(event, item)}
-								on:pointermove={rotateImage}
-								on:pointerup={endImageRotate}
-								on:pointercancel={endImageRotate}
-								on:keydown={(event) => handleRotateKeydown(event, item)}
-								aria-label={`Rotate ${item.alt ?? 'image'}`}
-							>
-								⟳
-							</button>
-							<button
-								type="button"
-								class="resize-image"
-								on:pointerdown={(event) => startImageResize(event, item)}
-								on:pointermove={resizeImage}
-								on:pointerup={endImageResize}
-								on:pointercancel={endImageResize}
-								on:keydown={(event) => handleResizeKeydown(event, item)}
-								aria-label={`Resize ${item.alt ?? 'image'}`}
-							>
-								↘
-							</button>
+							<button type="button" class="ctrl-btn remove-btn" on:click={() => removeItem(item.id)} aria-label="Remove">×</button>
+
+							<button type="button" class="ctrl-btn rotate-btn"
+								on:pointerdown={(e) => startRotate(e, item)}
+								on:pointermove={onRotateMove}
+								on:pointerup={endRotate}
+								on:pointercancel={endRotate}
+								aria-label="Rotate">⟳</button>
+
+							{#if item.type === 'image'}
+								<button type="button" class="ctrl-btn resize-btn"
+									on:pointerdown={(e) => startResize(e, item)}
+									on:pointermove={onResizeMove}
+									on:pointerup={endResize}
+									on:pointercancel={endResize}
+									aria-label="Resize">↘</button>
+							{/if}
+
+							{#if item.type === 'text'}
+								<button type="button" class="ctrl-btn edit-btn" on:click={(e) => startEditingText(e, item)} aria-label="Edit text">✎</button>
+							{/if}
 						{/if}
 					</div>
 				{/each}
 			</div>
 
-			{#if !items.length && !strokes.length}
+			{#if !items.length}
 				<div class="empty-state" aria-hidden="true">
-					<div>{isUploading ? 'Adding your picture…' : 'Drop a picture anywhere'}</div>
-					<span>Then write directly on the page</span>
+					<div>{isUploading ? 'Adding your picture…' : 'Hold to add a note'}</div>
+					<span>long-press anywhere to get started</span>
 				</div>
 			{/if}
 		</div>
 	</div>
 
-	<div class="drawing-tools" style={drawingToolsStyle} aria-label="Drawing tools">
-		<div class="tool-icons" aria-label="Pen and eraser">
-			<button type="button" class="tool-icon" class:active={currentTool === 'pencil'} aria-label="Draw" aria-pressed={currentTool === 'pencil'} title="Draw" on:click={() => setTool('pencil')}>
-				✏️
+	<!-- Context menu -->
+	{#if contextMenu.visible}
+		<div class="context-backdrop" role="presentation"
+			on:click={closeContextMenu}
+			on:keydown={(e) => e.key === 'Escape' && closeContextMenu()}></div>
+		<div class="context-menu"
+			style="--mx: {contextMenu.x}px; --my: {contextMenu.y}px"
+			role="menu" aria-label="Add to canvas">
+			<button type="button" class="context-opt" role="menuitem" on:click={addTextAtMenu}>
+				<span class="context-icon">✏️</span>
+				<span>Add Note</span>
 			</button>
-			<button type="button" class="tool-icon" class:active={currentTool === 'eraser'} aria-label="Erase" aria-pressed={currentTool === 'eraser'} title="Erase" on:click={() => setTool('eraser')}>
-				🧽
+			<button type="button" class="context-opt" role="menuitem" on:click={addPhotoAtMenu}>
+				<span class="context-icon">📷</span>
+				<span>Add Photo</span>
 			</button>
 		</div>
+	{/if}
 
-		<div class="color-palette" aria-label="Pen colors">
-			{#each penColors as color}
-				<button
-					type="button"
-					class="color-swatch"
-					class:active={currentTool === 'pencil' && brushColor === color.value}
-					style={`--swatch-color: ${color.value}`}
-					aria-label={`Use ${color.label} pen`}
-					title={`${color.label} pen`}
-					on:click={() => selectPenColor(color.value)}
-				>
-					<span class="sr-only">{color.label}</span>
+	<!-- Toolbar -->
+	<div class="canvas-toolbar" aria-label="Canvas tools">
+		<div class="toolbar-row">
+			<button type="button" class="tool-btn" aria-label="Add photo" title="Add photo" on:click={openFilePicker}>📷</button>
+
+			<div class="divider" aria-hidden="true"></div>
+
+			<div class="color-palette" aria-label="Text color">
+				{#each textColors as color}
+					<button type="button" class="color-swatch" class:active={activeTextColor === color.value}
+						style="--swatch: {color.value}" aria-label="{color.label} text" title="{color.label}"
+						on:click={() => applyTextColor(color.value)}>
+						<span class="sr-only">{color.label}</span>
+					</button>
+				{/each}
+			</div>
+
+			<div class="divider" aria-hidden="true"></div>
+
+			<div class="size-picker" aria-label="Text size">
+				{#each fontSizes as size}
+					<button type="button" class="size-btn" class:active={activeTextSize === size}
+						aria-label="Size {size}" title="Size {size}"
+						on:click={() => applyTextSize(size)}>
+						<span style="font-size: {Math.max(10, size * 0.55)}px">A</span>
+					</button>
+				{/each}
+			</div>
+		</div>
+
+		<div class="toolbar-row font-row">
+			{#each fontFamilies as font}
+				<button type="button" class="font-btn" class:active={activeFont === font.value}
+					style="font-family: {font.value}"
+					aria-label="{font.label} font" title="{font.label}"
+					on:click={() => applyTextFont(font.value)}>
+					{font.label}
 				</button>
 			{/each}
 		</div>
 	</div>
 
+	<input bind:this={fileInputEl} type="file" accept="image/*" multiple class="sr-only"
+		on:change={handleFileInputChange} tabindex="-1" aria-hidden="true" />
 	<p class="sr-only" aria-live="polite">{statusMessage}</p>
 </section>
 
@@ -911,7 +749,6 @@
 		position: fixed;
 		inset: 0;
 		z-index: 0;
-		min-height: 100svh;
 		pointer-events: auto;
 	}
 
@@ -922,6 +759,10 @@
 		width: 100vw;
 		height: 100svh;
 		min-height: 100svh;
+		touch-action: none;
+		user-select: none;
+		-webkit-user-select: none;
+		cursor: default;
 		background:
 			radial-gradient(circle at 10% 12%, rgba(255, 199, 218, 0.38), transparent 24rem),
 			radial-gradient(circle at 88% 18%, rgba(179, 136, 255, 0.22), transparent 20rem),
@@ -939,44 +780,19 @@
 		pointer-events: none;
 	}
 
-	.drawing-layer {
+	/* ── Items ── */
+	.canvas-item {
 		position: absolute;
-		inset: 0;
-		z-index: 4;
-		touch-action: none;
-		pointer-events: auto;
-		cursor: crosshair;
-	}
-
-	.drawing-layer.eraser-enabled {
-		cursor: none;
-	}
-
-	.eraser-outline {
-		position: absolute;
-		z-index: 6;
-		border: 2px solid rgba(99, 39, 69, 0.72);
-		border-radius: 999px;
-		background: rgba(255, 255, 255, 0.16);
-		box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.6), 0 8px 22px rgba(104, 43, 76, 0.16);
+		transform-origin: center;
 		pointer-events: none;
-		transform: translate(-50%, -50%);
 	}
 
-	.canvas-item,
-	.image-controls {
-		position: absolute;
+	.image-item {
 		display: block;
 		min-width: 4rem;
-		transform-origin: center;
 	}
 
-	.canvas-item {
-		z-index: 3;
-		pointer-events: none;
-	}
-
-	.canvas-item img {
+	.image-item img {
 		display: block;
 		width: 100%;
 		height: auto;
@@ -986,15 +802,11 @@
 		-webkit-user-drag: none;
 	}
 
-	.canvas-item.image-load-failed,
-	.image-controls.image-load-failed {
-		aspect-ratio: 4 / 3;
-		min-height: 4rem;
-	}
-
-	.canvas-item.image-load-failed {
+	.image-item.load-failed {
 		display: grid;
 		place-items: center;
+		aspect-ratio: 4 / 3;
+		min-height: 4rem;
 		padding: 0.65rem;
 		border: 1px solid rgba(196, 47, 98, 0.28);
 		border-radius: 1rem;
@@ -1004,9 +816,7 @@
 		text-align: center;
 	}
 
-	.canvas-item.image-load-failed img {
-		display: none;
-	}
+	.image-item.load-failed img { display: none; }
 
 	.image-fallback {
 		font-size: 0.74rem;
@@ -1014,18 +824,68 @@
 		line-height: 1.25;
 	}
 
-	.image-controls-layer {
+	.text-item { z-index: 3; }
+
+	.text-display {
+		font-size: var(--text-size, 24px);
+		font-weight: 800;
+		color: var(--text-color, #c2185b);
+		font-family: var(--text-font, Georgia, serif);
+		white-space: pre-wrap;
+		word-break: break-word;
+		max-width: 80vw;
+		line-height: 1.25;
+		cursor: grab;
+		padding: 0.2em 0.3em;
+		border-radius: 0.4em;
+		border: 1.5px solid transparent;
+		transition: border-color 120ms;
+		filter: drop-shadow(0 2px 8px rgba(93, 32, 62, 0.18));
+	}
+
+	.text-item.selected .text-display {
+		border-color: rgba(255, 95, 159, 0.4);
+		background: rgba(255, 255, 255, 0.18);
+	}
+
+	.text-editor {
+		font-size: var(--text-size, 24px);
+		font-weight: 800;
+		color: var(--text-color, #c2185b);
+		font-family: var(--text-font, Georgia, serif);
+		min-width: 8ch;
+		max-width: 80vw;
+		width: auto;
+		line-height: 1.25;
+		padding: 0.2em 0.3em;
+		border: 1.5px solid rgba(255, 95, 159, 0.55);
+		border-radius: 0.4em;
+		background: rgba(255, 255, 255, 0.72);
+		resize: none;
+		overflow: hidden;
+		outline: none;
+		box-shadow: 0 0 0 3px rgba(255, 95, 159, 0.18);
+		pointer-events: auto;
+		touch-action: auto;
+		user-select: text;
+		-webkit-user-select: text;
+	}
+
+	/* ── Controls overlay ── */
+	.controls-layer {
 		position: absolute;
 		inset: 0;
-		z-index: 5;
+		z-index: 1000;
 		pointer-events: none;
 	}
 
-	.image-controls {
+	.item-controls {
+		position: absolute;
+		transform-origin: center;
 		pointer-events: none;
 	}
 
-	.image-controls.selected {
+	.item-controls.selected {
 		filter: drop-shadow(0 0 0.7rem rgba(255, 95, 159, 0.18));
 	}
 
@@ -1039,40 +899,40 @@
 		-webkit-user-drag: none;
 	}
 
-	.image-controls.image-load-failed .control-measure {
-		height: 100%;
+	.text-measure {
+		font-weight: 800;
+		white-space: pre-wrap;
+		word-break: break-word;
+		max-width: 80vw;
+		line-height: 1.25;
+		padding: 0.2em 0.3em;
 	}
 
-	.select-image {
+	.drag-handle {
 		position: absolute;
 		inset: 0;
 		z-index: 0;
-		display: block;
 		width: 100%;
 		height: 100%;
 		padding: 0;
 		border: 0;
-		border-radius: 1rem;
 		background: transparent;
 		box-shadow: none;
 		cursor: grab;
+		touch-action: none;
 		pointer-events: auto;
 	}
 
-	.select-image:active {
-		cursor: grabbing;
-	}
+	.drag-handle:active { cursor: grabbing; }
 
-	.select-image:hover,
-	.select-image:focus-visible,
-	.image-controls.selected .select-image {
+	.drag-handle:hover,
+	.drag-handle:focus-visible,
+	.item-controls.selected .drag-handle {
 		outline: 3px solid rgba(255, 95, 159, 0.45);
 		outline-offset: 4px;
 	}
 
-	.remove-image,
-	.rotate-image,
-	.resize-image {
+	.ctrl-btn {
 		position: absolute;
 		z-index: 1;
 		display: grid;
@@ -1090,46 +950,84 @@
 		background: linear-gradient(135deg, #ff5f9f, #9d6bff);
 		box-shadow: 0 12px 28px rgba(111, 39, 78, 0.25), inset 0 1px 0 rgba(255, 255, 255, 0.5);
 		cursor: pointer;
-		opacity: 0.82;
+		opacity: 0.88;
 		pointer-events: auto;
-		transition: transform 160ms ease, opacity 160ms ease, box-shadow 160ms ease;
+		transition: transform 160ms ease, opacity 160ms ease;
 	}
 
-	.remove-image {
-		top: -0.8rem;
-		right: -0.8rem;
-	}
-
-	.rotate-image {
-		left: -0.8rem;
-		bottom: -0.8rem;
-		cursor: grab;
-		touch-action: none;
-	}
-
-	.rotate-image:active {
-		cursor: grabbing;
-	}
-
-	.resize-image {
-		right: -0.8rem;
-		bottom: -0.8rem;
-		cursor: nwse-resize;
-		touch-action: none;
-	}
-
-	.remove-image:hover,
-	.remove-image:focus-visible,
-	.rotate-image:hover,
-	.rotate-image:focus-visible,
-	.resize-image:hover,
-	.resize-image:focus-visible {
-		transform: scale(1.08);
+	.ctrl-btn:hover, .ctrl-btn:focus-visible {
+		transform: scale(1.1);
 		opacity: 1;
-		box-shadow: 0 16px 34px rgba(111, 39, 78, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.5);
 		outline: none;
 	}
 
+	.remove-btn { top: -0.9rem; right: -0.9rem; }
+	.rotate-btn { left: -0.9rem; bottom: -0.9rem; cursor: grab; touch-action: none; }
+	.resize-btn { right: -0.9rem; bottom: -0.9rem; cursor: nwse-resize; touch-action: none; }
+	.edit-btn   { left: -0.9rem; top: -0.9rem; }
+
+	/* ── Context menu ── */
+	.context-backdrop {
+		position: fixed;
+		inset: 0;
+		z-index: 40;
+		background: transparent;
+		pointer-events: auto;
+	}
+
+	.context-menu {
+		position: fixed;
+		left: clamp(0.75rem, var(--mx, 50%), calc(100vw - 11rem));
+		top: clamp(0.75rem, var(--my, 50%), calc(100svh - 9rem));
+		z-index: 50;
+		display: flex;
+		flex-direction: column;
+		gap: 0.3rem;
+		padding: 0.45rem;
+		border: 1px solid rgba(255, 255, 255, 0.72);
+		border-radius: 1.2rem;
+		background: linear-gradient(145deg, rgba(255, 255, 255, 0.92), rgba(255, 226, 242, 0.94));
+		box-shadow: 0 20px 48px rgba(120, 35, 80, 0.22), 0 2px 8px rgba(120, 35, 80, 0.1), inset 0 1px 0 #fff;
+		backdrop-filter: blur(28px) saturate(1.5);
+		pointer-events: auto;
+		animation: menu-pop 180ms cubic-bezier(0.34, 1.56, 0.64, 1) both;
+	}
+
+	@keyframes menu-pop {
+		from { opacity: 0; transform: scale(0.88); }
+		to   { opacity: 1; transform: scale(1); }
+	}
+
+	.context-opt {
+		display: flex;
+		align-items: center;
+		gap: 0.65rem;
+		padding: 0.6rem 1rem;
+		border: 0;
+		border-radius: 0.8rem;
+		font: inherit;
+		font-size: 1rem;
+		font-weight: 700;
+		color: #5a1a35;
+		background: transparent;
+		cursor: pointer;
+		transition: background 120ms ease, transform 120ms ease;
+		white-space: nowrap;
+		min-width: 9.5rem;
+	}
+
+	.context-opt:hover, .context-opt:focus-visible {
+		background: rgba(255, 95, 159, 0.12);
+		transform: translateX(2px);
+		outline: none;
+	}
+
+	.context-icon {
+		font-size: 1.3rem;
+		line-height: 1;
+	}
+
+	/* ── Empty state ── */
 	.empty-state {
 		position: absolute;
 		inset: 0;
@@ -1143,9 +1041,9 @@
 	}
 
 	.empty-state div {
-		font-size: clamp(2rem, 8vw, 5.4rem);
+		font-size: clamp(1.8rem, 7vw, 4.5rem);
 		font-weight: 900;
-		letter-spacing: -0.08em;
+		letter-spacing: -0.06em;
 	}
 
 	.empty-state span {
@@ -1153,87 +1051,152 @@
 		letter-spacing: 0.02em;
 	}
 
-	.drawing-tools {
+	/* ── Toolbar ── */
+	.canvas-toolbar {
 		position: fixed;
 		left: 50%;
-		top: clamp(5.2rem, 11.5vw, 8.85rem);
-		z-index: 6;
+		bottom: calc(max(1rem, env(safe-area-inset-bottom)) + 5.5rem);
+		z-index: 30;
 		display: flex;
+		flex-direction: column;
 		align-items: center;
-		gap: 0.25rem;
-		padding: 0.26rem;
+		gap: 0.35rem;
+		padding: 0.4rem 0.6rem;
 		border: 1px solid rgba(255, 255, 255, 0.68);
-		border-radius: 999px;
-		background: linear-gradient(135deg, rgba(255, 255, 255, 0.66), rgba(255, 226, 240, 0.76));
-		box-shadow: 0 12px 28px rgba(150, 44, 92, 0.14), inset 0 1px 0 rgba(255, 255, 255, 0.95);
+		border-radius: 1.4rem;
+		background: linear-gradient(135deg, rgba(255, 255, 255, 0.72), rgba(255, 226, 240, 0.82));
+		box-shadow: 0 12px 28px rgba(150, 44, 92, 0.16), inset 0 1px 0 rgba(255, 255, 255, 0.95);
 		backdrop-filter: blur(22px) saturate(1.4);
 		pointer-events: auto;
 		transform: translateX(-50%);
 	}
 
-	.tool-icons,
-	.color-palette {
+	.toolbar-row {
 		display: flex;
 		align-items: center;
-		gap: 0.18rem;
+		gap: 0.3rem;
 	}
 
-	.tool-icons {
-		padding-right: 0.22rem;
-		border-right: 1px solid rgba(142, 63, 99, 0.12);
-	}
-
-	.drawing-tools button {
+	.tool-btn {
+		display: grid;
+		place-items: center;
+		width: 2rem;
+		height: 2rem;
+		padding: 0;
 		border: 0;
 		border-radius: 999px;
 		font: inherit;
+		font-size: 1rem;
 		color: #6b2842;
 		background: rgba(255, 255, 255, 0.92);
-		box-shadow: 0 6px 14px rgba(160, 50, 100, 0.11), inset 0 1px 0 #fff;
+		box-shadow: 0 4px 10px rgba(160, 50, 100, 0.12), inset 0 1px 0 #fff;
 		cursor: pointer;
-		transition: transform 160ms ease, box-shadow 160ms ease, background 160ms ease;
+		transition: transform 160ms ease, box-shadow 160ms ease;
 	}
 
-	.tool-icon {
-		display: grid;
-		place-items: center;
-		width: 1.62rem;
-		height: 1.62rem;
-		padding: 0;
-		font-size: 0.78rem;
-		font-weight: 850;
-	}
-
-	.color-swatch {
-		display: grid;
-		place-items: center;
-		width: 1.08rem;
-		height: 1.08rem;
-		padding: 0;
-	}
-
-	.drawing-tools .color-swatch {
-		background-color: var(--swatch-color);
-		background-image: linear-gradient(145deg, rgba(255, 255, 255, 0.34), transparent 48%);
-		box-shadow: inset 0 0 0 1.5px rgba(255, 255, 255, 0.94), 0 6px 12px rgba(115, 37, 78, 0.1);
-	}
-
-	.drawing-tools button:hover,
-	.drawing-tools button:focus-visible {
+	.tool-btn:hover, .tool-btn:focus-visible {
 		transform: translateY(-1px);
-		box-shadow: 0 10px 18px rgba(160, 50, 100, 0.17), inset 0 1px 0 #fff;
+		box-shadow: 0 8px 18px rgba(160, 50, 100, 0.2), inset 0 1px 0 #fff;
 		outline: none;
 	}
 
-	.tool-icon.active {
-		color: #fff;
-		background: linear-gradient(135deg, #ff5f9f, #9d6bff);
+	.divider {
+		width: 1px;
+		height: 1.4rem;
+		background: rgba(142, 63, 99, 0.16);
+		margin: 0 0.1rem;
 	}
 
-	.drawing-tools .color-swatch.active {
-		outline: 1.5px solid #fff;
+	.color-palette {
+		display: flex;
+		align-items: center;
+		gap: 0.22rem;
+	}
+
+	.color-swatch {
+		display: block;
+		width: 1.15rem;
+		height: 1.15rem;
+		padding: 0;
+		border: 0;
+		border-radius: 999px;
+		background-color: var(--swatch);
+		background-image: linear-gradient(145deg, rgba(255,255,255,0.3), transparent 55%);
+		box-shadow: inset 0 0 0 1.5px rgba(255,255,255,0.9), 0 4px 8px rgba(115,37,78,0.12);
+		cursor: pointer;
+		transition: transform 140ms ease;
+	}
+
+	.color-swatch:hover { transform: scale(1.15); }
+
+	.color-swatch.active {
+		outline: 2px solid #fff;
 		outline-offset: 1.5px;
-		box-shadow: 0 0 0 3px rgba(255, 95, 159, 0.36), 0 8px 14px rgba(115, 37, 78, 0.16);
+		box-shadow: 0 0 0 3.5px rgba(255, 95, 159, 0.4), 0 4px 10px rgba(115,37,78,0.14);
+	}
+
+	.size-picker {
+		display: flex;
+		align-items: center;
+		gap: 0.15rem;
+	}
+
+	.size-btn {
+		display: grid;
+		place-items: center;
+		width: 1.7rem;
+		height: 1.7rem;
+		padding: 0;
+		border: 0;
+		border-radius: 999px;
+		background: rgba(255, 255, 255, 0.88);
+		box-shadow: 0 3px 8px rgba(160, 50, 100, 0.1), inset 0 1px 0 #fff;
+		cursor: pointer;
+		transition: transform 140ms ease, background 140ms ease;
+		color: #6b2842;
+		font-family: Georgia, serif;
+		font-weight: 700;
+	}
+
+	.size-btn:hover { transform: scale(1.08); }
+
+	.size-btn.active {
+		background: linear-gradient(135deg, #ff5f9f, #9d6bff);
+		color: #fff;
+		box-shadow: 0 6px 16px rgba(111, 39, 78, 0.22), inset 0 1px 0 rgba(255,255,255,0.4);
+	}
+
+	/* ── Font row ── */
+	.font-row {
+		gap: 0.2rem;
+		padding-top: 0.1rem;
+		border-top: 1px solid rgba(142, 63, 99, 0.1);
+		width: 100%;
+		justify-content: center;
+	}
+
+	.font-btn {
+		display: grid;
+		place-items: center;
+		padding: 0.18rem 0.55rem;
+		border: 1.5px solid transparent;
+		border-radius: 999px;
+		font-size: 0.78rem;
+		font-weight: 700;
+		color: #6b2842;
+		background: rgba(255, 255, 255, 0.82);
+		box-shadow: 0 2px 6px rgba(160, 50, 100, 0.08), inset 0 1px 0 #fff;
+		cursor: pointer;
+		transition: transform 130ms ease, background 130ms ease;
+		white-space: nowrap;
+	}
+
+	.font-btn:hover { transform: scale(1.06); }
+
+	.font-btn.active {
+		background: linear-gradient(135deg, #ff5f9f, #9d6bff);
+		color: #fff;
+		box-shadow: 0 5px 14px rgba(111, 39, 78, 0.22), inset 0 1px 0 rgba(255,255,255,0.35);
 	}
 
 	.sr-only {
@@ -1248,17 +1211,10 @@
 		border: 0;
 	}
 
-	@media (max-width: 720px) {
-		.drawing-tools {
-			top: clamp(4.6rem, 22vw, 6.2rem);
-			gap: 0.2rem;
-			padding: 0.22rem;
-		}
-
-		.tool-icon {
-			width: 1.5rem;
-			height: 1.5rem;
-			font-size: 0.72rem;
+	@media (max-width: 520px) {
+		.canvas-toolbar {
+			gap: 0.28rem;
+			padding: 0.32rem 0.44rem;
 		}
 
 		.color-swatch {
@@ -1266,9 +1222,14 @@
 			height: 1rem;
 		}
 
-		.canvas-item,
-		.image-controls {
-			min-width: 3rem;
+		.size-btn {
+			width: 1.45rem;
+			height: 1.45rem;
+		}
+
+		.font-btn {
+			font-size: 0.7rem;
+			padding: 0.15rem 0.42rem;
 		}
 	}
 </style>
